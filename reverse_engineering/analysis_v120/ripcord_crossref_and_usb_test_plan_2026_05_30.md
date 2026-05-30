@@ -177,3 +177,42 @@ align indices before declaring agree/disagree).
 All SPI3 transfers in both files are timeout-guarded (100000-spin → `0xFF`), and
 the new `spi3 xfer`/`spi3 seq` always deassert CS on exit, so no test can hang or
 brick the device.
+
+---
+
+## BENCH RESULTS — 2026-05-30 (executed over USB CDC, no logic analyzer)
+
+Firmware with `spi3 xfer`/`spi3 seq` flashed and driven via
+`scripts/serial_cmd.py`. Every software-testable hypothesis was **refuted as the
+cause of our dead MISO**:
+
+| Hypothesis | Test run | Result |
+|---|---|---|
+| ripcord command-first | `spi3 xfer 05`, `12`, `15`, `04 FF..`, `01 05`, `03 FF..`, `spi3 seq 09 FF FF \| 0A FF FF`, `spi3 xfer 09 FF FF 0A FF FF` | **all MISO = `0xFF`, PC0 `1→1`** — sending the command byte first does NOT wake the slave |
+| PB11 gating | `spi3 h2verify` with PB11 already HIGH | **0 / 115638 non-FF**, PC0 final = 1 — blob upload with the gate open still produces no MISO |
+| SPI3 master health | T0 `status` | CTRL1=`0x0347` (Mode3/master//2/SPE/SW-CS ✓), SPI3 timeouts **0**, SPI3 OK climbing — **master clocks fine** |
+
+**T0 baseline (`status`):** Initialized YES; SPI3 active NO; TX 714 / **echo 0 /
+data 0** (FPGA ignores USART TX); SPI3 OK 476, timeouts 0; first byte `0xFF`;
+`init_hs[]` G1/G2/G3/Probe **all `FF`**; IOMUX remap & remap5 LIVE both
+`0x02000000`; PB4(MISO)=1, PC6=1, PB6=1; H2 115638/115638 done; PC0=1.
+`gpio scan`: PC6=1, **PB11=1**, PC0=1, PB3(SCK)=1, PB5(MOSI)=1.
+
+**Signature:** MISO (PB4) is inert under *every* stimulus — boot handshake, the
+full 115638-byte blob (boot + re-upload), and all command bytes — never driven
+low once, while the master clocks perfectly. PC0 permanently HIGH.
+
+**Conclusion — blocker is UPSTREAM of the SPI command protocol.** The FPGA's
+SPI3 data *output* never turns on. Two surviving root-cause candidates:
+1. **The FPGA never accepts a command to enable SPI3 streaming.** Note the FPGA
+   *does* talk USART (meter data streams autonomously in meter mode, see
+   `project_fpga_meter_ic`) but **ignores all TX commands** (0 echoes). If SPI3
+   streaming is unlocked by a USART command the FPGA accepts, the USART-ignored
+   problem is the true blocker. → next software direction: get the FPGA to ack
+   one TX command (baud/framing/boot-order investigation).
+2. **MISO (PB4) is not physically driven by the FPGA.** Cannot be confirmed or
+   refuted in software — needs a logic analyzer / continuity check.
+
+**Ruled out (do not revisit):** ripcord command-first dispatch and PB11
+gating-order are NOT the fix. The ripcord SPI3 cross-ref leads that were
+software-testable are now exhausted.

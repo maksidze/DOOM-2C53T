@@ -1754,9 +1754,10 @@ static void cmd_spi3_xfer(const char *args)
     strcpy(buf, args);
 
     for (tok = strtok_r(buf, " \t", &saveptr); tok; tok = strtok_r(NULL, " \t", &saveptr)) {
-        uint32_t v;
+        char *end;
+        unsigned long v = strtoul(tok, &end, 16);   /* bare hex; "0x" optional */
         if (n >= SPI3_XFER_MAX) { usb_debug_printf("ERR: max %d bytes\r\n", SPI3_XFER_MAX); return; }
-        if (parse_int(tok, &v) != 0 || v > 0xFF) { usb_debug_printf("ERR: bad byte '%s'\r\n", tok); return; }
+        if (*end != '\0' || v > 0xFF) { usb_debug_printf("ERR: bad hex byte '%s'\r\n", tok); return; }
         tx[n++] = (uint8_t)v;
     }
     if (n == 0) { usb_send_str("Usage: spi3 xfer <b0> <b1> ...\r\n"); return; }
@@ -1804,9 +1805,10 @@ static void cmd_spi3_seq(const char *args)
             pulse_after[n - 1] = 1;       /* pulse CS after the previous byte */
             continue;
         }
-        uint32_t v;
+        char *end;
+        unsigned long v = strtoul(tok, &end, 16);   /* bare hex; "0x" optional */
         if (n >= SPI3_XFER_MAX) { usb_debug_printf("ERR: max %d bytes\r\n", SPI3_XFER_MAX); return; }
-        if (parse_int(tok, &v) != 0 || v > 0xFF) { usb_debug_printf("ERR: bad byte '%s'\r\n", tok); return; }
+        if (*end != '\0' || v > 0xFF) { usb_debug_printf("ERR: bad hex byte '%s'\r\n", tok); return; }
         pulse_after[n] = 0;
         tx[n++] = (uint8_t)v;
     }
