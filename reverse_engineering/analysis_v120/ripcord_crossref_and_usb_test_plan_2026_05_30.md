@@ -216,3 +216,32 @@ SPI3 data *output* never turns on. Two surviving root-cause candidates:
 **Ruled out (do not revisit):** ripcord command-first dispatch and PB11
 gating-order are NOT the fix. The ripcord SPI3 cross-ref leads that were
 software-testable are now exhausted.
+
+---
+
+## USART-IGNORE INVESTIGATION — 2026-05-30 (RESOLVED: it was a misdiagnosis)
+
+We set out to "crack" the FPGA-ignores-TX problem. **It is not a problem — the
+FPGA responds.** Evidence over the USB shell:
+
+- **TX hardware good:** `mem read 0x40004400` → STS=`0x...C0` (TDC+TDBE, frames
+  transmit & complete), BAUD=`0x30D4`=12500 (9600 baud exact at PCLK1=120MHz),
+  CTRL1=`0x202C` (UEN/TE/RE/RDBFIEN). Our 10-byte TX frame is byte-for-byte
+  identical to stock (`[2]=cmd_hi [3]=cmd_lo [9]=csum`, rest 0 incl. header).
+- **FPGA responds, command-driven:** in meter config, `fpga cmd 00 09` → exactly
+  one `5A A5` data frame (`Delta: TX +1 RX +12 DF +1`). Burst of commands tracks
+  ~1:1 (TX 38 → DF 32). Example frame: `5A A5 E4 2E 63 25 07 00 00 00 01 12`.
+  In **scope** config the same command yields `DF +0` — because the meter IC
+  isn't routed there, and scope data is meant to flow over SPI3 (separately dead).
+- **Not autonomous:** data-frame count scales with command count, contradicting
+  the old "streams meter data autonomously" note. It is request-response.
+- **The one real quirk:** the FPGA **never** sends echo frames (`AA 55`) —
+  `EF=0` across every command. The meter pipeline works without them, so it's
+  benign. Whether stock scope sequencing depends on echo-frame acks is an open
+  (minor) question.
+
+**Conclusion:** USART2 is a fully working bidirectional command/response link.
+**It is NOT the blocker for the scope/SPI3 path.** Combined with the SPI3
+results above, the scope deadness is isolated to the SPI3 *data interface*
+(MISO inert) — which needs a logic analyzer / continuity check to resolve.
+Corrected memory: `project_fpga_ignores_tx`.
