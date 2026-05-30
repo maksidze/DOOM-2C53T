@@ -186,6 +186,71 @@ static uint8_t spi3_xfer(uint8_t tx_byte)
     return (uint8_t)FPGA_SPI->dt;
 }
 
+/* Double-buffered SPI3 pump (per GitHub issue #11, Lanchon).
+ *
+ * spi3_xfer()'s order — wait TDBE, write, wait RDBF, read — only queues
+ * the NEXT tx byte after the current byte's RX has landed, by which point
+ * the shift register has already drained. That underruns the transmitter
+ * and clock-stretches the SPI bus between every byte; an interrupt landing
+ * in the RDBF busy-wait widens the gap arbitrarily. Over the 115KB H2
+ * upload that is tens of thousands of stalls.
+ *
+ * This pump primes the tx buffer one byte ahead: the moment TDBE frees it
+ * writes tx[i], THEN blocks on RDBF for tx[i-1]. The shift register is
+ * reloaded back-to-back so the clock runs continuously, and the pump
+ * tolerates any interrupt shorter than one byte-time.
+ *
+ *   tx: bytes to send, or NULL to clock out 0xFF filler (read-only)
+ *   rx: receive buffer, or NULL to discard (write-only)
+ *   n:  byte count. Caller manages CS.
+ *
+ * Timeout-guarded like spi3_xfer so a misconfigured peripheral can't hang
+ * the boot; on timeout the byte is treated as 0xFF and we keep going.
+ */
+static void spi3_pump(const uint8_t *tx, volatile uint8_t *rx, uint32_t n)
+{
+    if (n == 0)
+        return;
+
+    volatile uint32_t timeout;
+    uint32_t i = 0;
+
+    /* Prime the first byte. */
+    timeout = 100000;
+    while (!(FPGA_SPI->sts & SPI_I2S_TDBE_FLAG)) {
+        if (--timeout == 0) break;
+    }
+    FPGA_SPI->dt = tx ? tx[0] : 0xFF;
+
+    while (++i < n) {
+        /* Queue the next tx byte the instant the buffer frees — BEFORE
+         * blocking on RX. This is what keeps the shift register fed. */
+        timeout = 100000;
+        while (!(FPGA_SPI->sts & SPI_I2S_TDBE_FLAG)) {
+            if (--timeout == 0) break;
+        }
+        FPGA_SPI->dt = tx ? tx[i] : 0xFF;
+
+        /* Collect the previous byte's RX. */
+        timeout = 100000;
+        while (!(FPGA_SPI->sts & SPI_I2S_RDBF_FLAG)) {
+            if (--timeout == 0) break;
+        }
+        uint8_t r = (timeout == 0) ? 0xFF : (uint8_t)FPGA_SPI->dt;
+        if (rx)
+            rx[i - 1] = r;
+    }
+
+    /* Drain the final byte's RX. */
+    timeout = 100000;
+    while (!(FPGA_SPI->sts & SPI_I2S_RDBF_FLAG)) {
+        if (--timeout == 0) break;
+    }
+    uint8_t rlast = (timeout == 0) ? 0xFF : (uint8_t)FPGA_SPI->dt;
+    if (rx)
+        rx[n - 1] = rlast;
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * USART2 Byte-Level TX (used during boot, before tasks are running)
  * ═══════════════════════════════════════════════════════════════════ */
@@ -1404,25 +1469,23 @@ void fpga_init(void)
         IOMUX->remap = remap;
     }
 
-    /* GMUX remap (AT32-specific, controls actual pin mux).
+    /* GMUX remap — AT32-specific pin routing fabric.
      *
-     * CRITICAL: Stock firmware NEVER writes SPI3_GMUX (remap5).
-     * It leaves bits [27:24] at reset default 0000, which means
-     * "use legacy remap path." The legacy remap + JTAG disable
-     * is sufficient to route SPI3 to PB3/PB4/PB5.
+     * CRITICAL: on AT32 the GMUX overrides the legacy remap and its
+     * SPI3 default routes SPI3 to PC10/11/12, NOT PB3/4/5. The legacy
+     * SWJ_CFG=010 write above frees the JTAG pins but does NOT by itself
+     * connect SPI3 to them. We MUST call SPI3_GMUX_0010 to route
+     * SPI3 → PB3(SCK)/PB4(MISO)/PB5(MOSI)/PB6.
      *
-     * Our previous SPI3_GMUX_0010 call was WRONG — it actively
-     * overrode the legacy path with a GMUX value that may resolve
-     * pin routing differently on the AT32, causing MISO to be
-     * disconnected. Discovered 2026-04-07 by comparing register
-     * writes in stock master_init decompilation. */
+     * Do NOT remove this based on "the stock decompilation never writes
+     * SPI3_GMUX." Stock is a GD32 binary; the AT32 GMUX register block
+     * does not exist in its world, so it CANNOT contain such a write —
+     * its absence proves nothing about the AT32's needs. Bench-confirmed
+     * 2026-04-06: SCK does not toggle on PB3 without this call. The HAL's
+     * own JTAG-pin SPI3 example writes both SWJTAG_GMUX_010 and
+     * SPI3_GMUX_0010. See memory feedback_at32_gmux + GitHub issue #11. */
     gpio_pin_remap_config(SWJTAG_GMUX_010, TRUE);
-    /* SPI3_GMUX_0010: Route SPI3 to PB3(SCK)/PB4(MISO)/PB5(MOSI).
-     * 2026-04-07 analysis claimed stock never writes this, but
-     * 2026-04-06 bench test proved SCK doesn't toggle without it.
-     * Empirical evidence wins over analysis. Without this call,
-     * GMUX defaults to 0000 = SPI3 disconnected from pins. */
-    gpio_pin_remap_config(SPI3_GMUX_0010, TRUE);
+    gpio_pin_remap_config(SPI3_GMUX_0010, TRUE);  /* route SPI3 → PB3/PB4/PB5/PB6 */
 
     /* ---------------------------------------------------------------
      * Step 2: USART2 init — 9600 baud, 8N1, TX+RX with interrupts
@@ -1457,20 +1520,31 @@ void fpga_init(void)
     NVIC_SetPriority(USART2_IRQn, 5);  /* Below FreeRTOS max syscall priority */
 
     /* ---------------------------------------------------------------
-     * Step 3: USART boot commands — DEFERRED to after SPI3 upload
+     * Step 3: Wait for FPGA to finish booting
+     *
+     * The stock firmware does ~2-3 seconds of LCD init, boot screen
+     * animation (including a power-button-release wait loop), SPI flash
+     * reads, and timer/FreeRTOS setup BEFORE touching SPI3. During all
+     * that time, the FPGA is loading its bitstream from internal flash
+     * and initializing its SPI slave.
+     *
+     * Our custom firmware reaches this point much faster (~500ms after
+     * power-on). If we start SPI3 before the FPGA finishes booting,
+     * the SPI slave won't be active yet → MISO stuck at 0xFF.
+     *
+     * Add an explicit delay to match the stock firmware's implicit
+     * boot time. Try 2000ms as a conservative starting point.
+     * --------------------------------------------------------------- */
+    systick_delay_ms(2000);
+
+    /* ---------------------------------------------------------------
+     * USART boot commands — DEFERRED to after SPI3 upload
      *
      * Stock firmware (ripcord disassembly of FUN_08027a50) sends USART
      * commands 1, 2, 6, 7, 8 AFTER the entire SPI3 handshake + H2
      * upload + post-upload cleanup completes. They are queued via
      * xQueueSend at addresses 0x0802ADCE+, after the last SPI3_DT
      * access at 0x0802ADC6.
-     *
-     * Previously we sent commands 0x01-0x08 here (before SPI3 init).
-     * Commands 0x03-0x05 were also not in the stock boot sequence.
-     * Sending commands before SPI3 may put the FPGA in a state where
-     * it disables its SPI slave interface.
-     *
-     * Moved to Step 7c below, after SPI3 post-upload cleanup.
      * --------------------------------------------------------------- */
 
     /* ---------------------------------------------------------------
@@ -1625,26 +1699,42 @@ void fpga_init(void)
      * then does the CS toggle dance in post-upload cleanup. */
     SPI3_CS_ASSERT();
 
-    /* Group 1: sync + command 0x05 + 2 padding */
-    fpga.init_hs[0]  = spi3_xfer(0x00);   /* Sync/reset */
-    fpga.init_hs[1]  = spi3_xfer(0x05);   /* Command */
-    fpga.init_hs[2]  = spi3_xfer(0x00);   /* Padding */
-    fpga.init_hs[3]  = spi3_xfer(0x00);   /* Padding */
+    /* Warm-up clocks (per SPI3_INIT_SEQUENCE_DECODED.md finding #2).
+     *
+     * Stock clocks several dummy SPI3 exchanges with ~100ms gaps after
+     * PC6 HIGH, before the real handshake — the FPGA SPI slave appears to
+     * need SCK edges to arm its RX path before it will latch a command.
+     * We send two 4-byte bursts of 0x00 with a delay between them. The
+     * RX is discarded. Bench-tunable; if it desyncs the FPGA, remove. */
+    {
+        static const uint8_t warmup[4] = { 0x00, 0x00, 0x00, 0x00 };
+        spi3_pump(warmup, NULL, sizeof(warmup));
+        systick_delay_ms(100);
+        spi3_pump(warmup, NULL, sizeof(warmup));
+        systick_delay_ms(100);
+    }
+
+    /* Group 1: sync + command 0x05 + 2 padding (double-buffered pump) */
+    {
+        static const uint8_t g1[4] = { 0x00, 0x05, 0x00, 0x00 };
+        spi3_pump(g1, &fpga.init_hs[0], sizeof(g1));
+    }
 
     systick_delay_ms(100);
 
     /* Group 2: command 0x12 + 2 padding */
-    fpga.init_hs[4]  = spi3_xfer(0x12);   /* Command */
-    fpga.init_hs[5]  = spi3_xfer(0x00);   /* Padding */
-    fpga.init_hs[6]  = spi3_xfer(0x00);   /* Padding */
+    {
+        static const uint8_t g2[3] = { 0x12, 0x00, 0x00 };
+        spi3_pump(g2, &fpga.init_hs[4], sizeof(g2));
+    }
 
     systick_delay_ms(100);
 
     /* Group 3: command 0x15 + 2 padding + 0x3B (begin upload) */
-    fpga.init_hs[7]  = spi3_xfer(0x15);   /* Command */
-    fpga.init_hs[8]  = spi3_xfer(0x00);   /* Padding */
-    fpga.init_hs[9]  = spi3_xfer(0x00);   /* Padding */
-    fpga.init_hs[10] = spi3_xfer(0x3B);   /* Begin bulk upload */
+    {
+        static const uint8_t g3[4] = { 0x15, 0x00, 0x00, 0x3B };
+        spi3_pump(g3, &fpga.init_hs[7], sizeof(g3));
+    }
 
     /* ---------------------------------------------------------------
      * Step 7: SPI3 bulk FPGA register-init table upload
@@ -1661,12 +1751,12 @@ void fpga_init(void)
      * See: analysis_v120/h2_extracted/FINDINGS.md
      * --------------------------------------------------------------- */
 
-    /* Stream the entire 115,638-byte table in 3-byte frames */
-    for (uint32_t i = 0; i < FPGA_H2_CAL_TABLE_SIZE; i += 3) {
-        spi3_xfer(fpga_h2_cal_table[i]);
-        spi3_xfer(fpga_h2_cal_table[i + 1]);
-        spi3_xfer(fpga_h2_cal_table[i + 2]);
-    }
+    /* Stream the entire 115,638-byte table back-to-back via the
+     * double-buffered pump. The old 3-byte-frame loop used spi3_xfer per
+     * byte, which underran the TX shift register between every byte and
+     * clock-stretched the whole 115KB upload (issue #11). The bytes are
+     * contiguous in the table, so a single pump sends them gap-free. */
+    spi3_pump(fpga_h2_cal_table, NULL, FPGA_H2_CAL_TABLE_SIZE);
     fpga.h2_bytes_sent = FPGA_H2_CAL_TABLE_SIZE;
     fpga.h2_upload_done = 1;
 

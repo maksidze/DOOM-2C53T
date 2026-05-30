@@ -426,6 +426,8 @@ static void cmd_help(void)
         "fpga scope trig <4 bytes>       Send 0x07/0x0A,0x16..0x19\r\n"
         "fpga acq [mode]                 Trigger SPI3 acquisition\r\n"
         "spi3 read [len]                 Raw SPI3 read + hex dump\r\n"
+        "spi3 xfer <hex...>              Send arbitrary MOSI bytes, dump MISO\r\n"
+        "spi3 seq <b..> | <b..>          xfer w/ mid-sequence CS pulse at '|'\r\n"
         "spi3 acqtest                    Decomposer Phase 20 validation test\r\n"
         "spi3 h2verify                   Re-upload H2 + capture FPGA responses\r\n"
         "reboot bootloader               Reboot into USB HID updater\r\n"
@@ -1731,6 +1733,105 @@ static void cmd_spi3_h2verify(void)
     usb_send_str("=== Done ===\r\n");
 }
 
+/* spi3 xfer <hex...> — send an arbitrary MOSI byte sequence over SPI3 with
+ * software CS and dump the MISO bytes clocked back. This is the generic
+ * primitive needed to replay ripcord's literal command frames — e.g.
+ * "spi3 xfer 04" to test whether a command-FIRST byte (which our acquisition
+ * path never sends) wakes the FPGA, or "spi3 xfer 05" for the ID query.
+ * CS (PB6) is asserted LOW only after every byte parses, and is ALWAYS
+ * deasserted on exit so the FPGA slave is never left gated off. */
+#define SPI3_XFER_MAX 64
+static void cmd_spi3_xfer(const char *args)
+{
+    uint8_t tx[SPI3_XFER_MAX];
+    uint8_t rx[SPI3_XFER_MAX];
+    char buf[200];
+    char *saveptr = NULL;
+    char *tok;
+    uint32_t n = 0;
+
+    if (strlen(args) >= sizeof(buf)) { usb_send_str("ERR: line too long\r\n"); return; }
+    strcpy(buf, args);
+
+    for (tok = strtok_r(buf, " \t", &saveptr); tok; tok = strtok_r(NULL, " \t", &saveptr)) {
+        uint32_t v;
+        if (n >= SPI3_XFER_MAX) { usb_debug_printf("ERR: max %d bytes\r\n", SPI3_XFER_MAX); return; }
+        if (parse_int(tok, &v) != 0 || v > 0xFF) { usb_debug_printf("ERR: bad byte '%s'\r\n", tok); return; }
+        tx[n++] = (uint8_t)v;
+    }
+    if (n == 0) { usb_send_str("Usage: spi3 xfer <b0> <b1> ...\r\n"); return; }
+
+    uint32_t pc0_before = (GPIOC->idt & 1) ? 1 : 0;
+    GPIOB->clr = (1 << 6);          /* CS assert (LOW) */
+    for (uint32_t i = 0; i < n; i++)
+        rx[i] = spi3_raw_xfer(tx[i]);
+    GPIOB->scr = (1 << 6);          /* CS deassert (HIGH) — always */
+    uint32_t pc0_after = (GPIOC->idt & 1) ? 1 : 0;
+
+    usb_send_str("MOSI:");
+    for (uint32_t i = 0; i < n; i++) usb_debug_printf(" %02X", tx[i]);
+    usb_send_str("\r\nMISO:");
+    uint32_t nonff = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        usb_debug_printf(" %02X", rx[i]);
+        if (rx[i] != 0xFF) nonff++;
+    }
+    usb_debug_printf("\r\nnon-FF: %lu/%lu  PC0 %lu->%lu\r\n",
+                     (unsigned long)nonff, (unsigned long)n, pc0_before, pc0_after);
+}
+
+/* spi3 seq <bytes> | <bytes> [| ...] — like "spi3 xfer" but pulse CS (PB6
+ * HIGH then LOW, ~tens of us inside this one handler) at each "|" separator.
+ * Reproduces ripcord's cmd-09 pattern "09 FF FF | 0A FF FF", where a
+ * mid-sequence CS pulse splits the command byte from the embedded 0x0A
+ * sub-opcode. CS is always deasserted on exit. */
+static void cmd_spi3_seq(const char *args)
+{
+    uint8_t tx[SPI3_XFER_MAX];
+    uint8_t rx[SPI3_XFER_MAX];
+    uint8_t pulse_after[SPI3_XFER_MAX];   /* 1 = pulse CS after this byte */
+    char buf[200];
+    char *saveptr = NULL;
+    char *tok;
+    uint32_t n = 0;
+
+    if (strlen(args) >= sizeof(buf)) { usb_send_str("ERR: line too long\r\n"); return; }
+    strcpy(buf, args);
+
+    for (tok = strtok_r(buf, " \t", &saveptr); tok; tok = strtok_r(NULL, " \t", &saveptr)) {
+        if (strcmp(tok, "|") == 0) {
+            if (n == 0) { usb_send_str("ERR: '|' before any byte\r\n"); return; }
+            pulse_after[n - 1] = 1;       /* pulse CS after the previous byte */
+            continue;
+        }
+        uint32_t v;
+        if (n >= SPI3_XFER_MAX) { usb_debug_printf("ERR: max %d bytes\r\n", SPI3_XFER_MAX); return; }
+        if (parse_int(tok, &v) != 0 || v > 0xFF) { usb_debug_printf("ERR: bad byte '%s'\r\n", tok); return; }
+        pulse_after[n] = 0;
+        tx[n++] = (uint8_t)v;
+    }
+    if (n == 0) { usb_send_str("Usage: spi3 seq <b..> | <b..>\r\n"); return; }
+
+    GPIOB->clr = (1 << 6);          /* CS assert */
+    for (uint32_t i = 0; i < n; i++) {
+        rx[i] = spi3_raw_xfer(tx[i]);
+        if (pulse_after[i]) {
+            GPIOB->scr = (1 << 6);              /* CS HIGH */
+            for (volatile int d = 0; d < 4000; d++);
+            GPIOB->clr = (1 << 6);              /* CS LOW */
+            for (volatile int d = 0; d < 4000; d++);
+        }
+    }
+    GPIOB->scr = (1 << 6);          /* CS deassert — always */
+
+    usb_send_str("MISO:");
+    for (uint32_t i = 0; i < n; i++) {
+        usb_debug_printf(" %02X", rx[i]);
+        if (pulse_after[i]) usb_send_str(" |");
+    }
+    usb_send_str("\r\n");
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * Command Dispatcher
  * ═══════════════════════════════════════════════════════════════════ */
@@ -1833,6 +1934,10 @@ static void dispatch_command(char *line)
         cmd_fpga_scope_trig(line + 16);
     } else if (strncmp(line, "fpga acq", 8) == 0) {
         cmd_fpga_acq(line[8] == ' ' ? line + 9 : "");
+    } else if (strncmp(line, "spi3 xfer", 9) == 0) {
+        cmd_spi3_xfer(line[9] == ' ' ? line + 10 : "");
+    } else if (strncmp(line, "spi3 seq", 8) == 0) {
+        cmd_spi3_seq(line[8] == ' ' ? line + 9 : "");
     } else if (strncmp(line, "spi3 read", 9) == 0) {
         cmd_spi3_read(line[9] == ' ' ? line + 10 : "");
     } else if (strcmp(line, "reboot bootloader") == 0) {
