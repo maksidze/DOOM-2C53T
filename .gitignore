@@ -73,3 +73,7 @@ scripts/.env
 
 # Node.js
 node_modules/
+
+# FNIRSI copyrighted SPI-flash dump + carved assets — local RE/backup only, do NOT publish
+archive/w25q128_dump_*.bin
+archive/w25q128_assets/
