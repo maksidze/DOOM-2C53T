@@ -291,6 +291,14 @@ emu: LDFLAGS += -Wl,--allow-multiple-definition
 emu: LDSCRIPT = ld/at32f403a.ld
 emu: clean all
 
+# Build a GUEST image that runs at 0x08007000 under the FNIRSI STOCK bootloader
+# (unit #2), flashed via the stock IAP drive (mcopy). main.c adjusts VTOR to
+# 0x7000 and skips the watchdog when GUEST_BUILD is defined. Used to run the
+# SPI3/FPGA debug shell on a known-good FPGA.
+guest: CFLAGS += -DGUEST_BUILD
+guest: LDSCRIPT = ld/at32f403a_guest.ld
+guest: clean all
+
 # Flash app via USB HID bootloader (bootloader must be running)
 flash: $(BUILD_DIR)/$(TARGET).bin
 	uv run ../scripts/hid_flash.py $<
@@ -336,4 +344,4 @@ soak-test: emu
 soak-quick: emu
 	python3 ../scripts/soak_test.py --no-build --duration 30 --seed $(SOAK_SEED) --verbose
 
-.PHONY: all clean disasm size renode soak-test soak-quick flash flash-dfu bootloader flash-bootloader flash-all
+.PHONY: all clean disasm size renode soak-test soak-quick flash flash-dfu bootloader flash-bootloader flash-all guest emu

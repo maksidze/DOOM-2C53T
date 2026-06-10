@@ -359,8 +359,13 @@ int main(void)
     GPIOC->cfghr = (GPIOC->cfghr & ~(0xF << 4)) | (0x3 << 4); /* PC9 push-pull 50MHz */
     GPIOC->scr = (1 << 9);  /* PC9 HIGH */
 
-    /* Set VTOR for app at 0x08004000 (bootloader occupies 0x08000000-0x08003FFF) */
+    /* Set VTOR. Normal build runs at 0x08004000 under our HID bootloader;
+     * GUEST_BUILD runs at 0x08007000 under the FNIRSI stock bootloader (unit #2). */
+#ifdef GUEST_BUILD
+    SCB->VTOR = FLASH_BASE | 0x7000;
+#else
     SCB->VTOR = FLASH_BASE | 0x4000;
+#endif
 
     /* Check if previous run requested DFU reboot (magic word in RAM).
      * RAM persists across soft reset, so the magic word survives. */
@@ -563,8 +568,12 @@ int main(void)
     boot_validate();
 
     /* Initialize watchdog LAST — after all tasks and timers are running.
-     * Once enabled, the FWDGT cannot be stopped (hardware limitation). */
+     * Once enabled, the FWDGT cannot be stopped (hardware limitation).
+     * Skipped in GUEST_BUILD so interactive SPI3 shell sessions on unit #2
+     * can't trip a watchdog reset mid-experiment. */
+#ifndef GUEST_BUILD
     watchdog_init();
+#endif
 
     vTaskStartScheduler();
 
