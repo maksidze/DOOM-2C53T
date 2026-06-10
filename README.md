@@ -135,6 +135,19 @@ Once the USB HID bootloader is installed, updates are simple:
    ```
 3. The device auto-reboots into the updated firmware
 
+### Restoring Stock or Flashing via USB-C (macOS & Linux)
+
+The device's **stock bootloader** also accepts firmware over USB-C — handy for restoring the original FNIRSI firmware or flashing without the HID bootloader. Hold **MENU + tap Power** to enter upgrade mode (the LCD shows "firmware upgrade"); the device mounts a FAT12 volume named `IAP`.
+
+> **macOS users:** do **not** drag-drop the `.bin` in Finder — macOS's FAT driver corrupts the write (the volume uses 2048-byte sectors and Finder adds AppleDouble `._` junk the bootloader misreads as firmware). Use the bundled flasher, which writes the device correctly:
+
+```bash
+brew install mtools                  # one-time (Linux: sudo apt install mtools)
+python3 scripts/iap_flash.py         # detect device → pick firmware → flash
+```
+
+It auto-detects the device and available images, verifies the stock firmware by SHA-256, and shows a progress bar. Subcommands: `status`, `list`, `flash <path>`, `doctor` (prerequisite check), `guide` (full walkthrough). A bad flash is never a brick — re-enter upgrade mode and reflash any image.
+
 ### Build
 
 ```bash
