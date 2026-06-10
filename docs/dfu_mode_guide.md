@@ -123,6 +123,16 @@ If you don't see the device, the BOOT0 jump didn't take. Try the procedure again
 
 The `dfu-util` + `make flash-all` path above is what I use and test on macOS. Users on other platforms have reported success with the alternatives below. I haven't personally verified these — they're documented here because they worked for real users, and they may be easier than fighting `dfu-util` on Windows or getting udev rules right on Linux.
 
+### Stock USB update channel — no case opening (macOS / Linux / Windows)
+
+Separate from the ROM DFU path above: the device's **stock bootloader** also accepts firmware over USB-C with the case closed. Hold **MENU + tap Power** to enter upgrade mode (LCD shows "firmware upgrade") — the device mounts a FAT12 drive named `IAP`. This is the channel for restoring the original FNIRSI firmware, or flashing an image without the HID bootloader.
+
+- **Windows:** drag-drop the `.bin` onto the `IAP` drive — this is the official FNIRSI update method and Windows' FAT driver handles the volume cleanly.
+- **macOS:** do **not** drag-drop in Finder — macOS corrupts the write (the volume uses 2048-byte sectors and Finder adds AppleDouble `._` junk the bootloader misreads as firmware). Use the bundled flasher: `brew install mtools && python3 scripts/iap_flash.py` (auto-detects the device and images, SHA-verifies stock, shows progress). `python3 scripts/iap_flash.py guide` prints the full walkthrough.
+- **Linux:** `scripts/iap_flash.py` works here too (or `mcopy` the `.bin` to the device, then `sync; sudo blockdev --flushbufs`).
+
+A bad flash is never a brick — re-enter upgrade mode and reflash any image.
+
 ### Windows: Artery ISP Programmer (community-contributed)
 
 Artery ships a Windows GUI flasher that speaks the same ROM DFU protocol as `dfu-util`. A user on Windows 11 reported (see [#4](https://github.com/DavidClawson/OpenScope-2C53T/issues/4)) that after fighting WinUSB/`dfu-util` setup they flashed successfully using Artery's tool instead.

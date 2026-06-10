@@ -87,6 +87,8 @@ make flash-all                   # Flash bootloader + app via DFU (first-time se
 make flash-dfu                   # Flash app via ROM DFU (fallback, BOOT0 + reset)
 ```
 
+**Stock IAP channel** (restore stock / flash without the HID bootloader; macOS + Linux): `python3 scripts/iap_flash.py` — MENU+Power → upgrade mode, then detect → pick → flash. Windows: drag-drop the `.bin` onto the `IAP` drive (official FNIRSI method). See `docs/dfu_mode_guide.md`.
+
 ### Normal dev cycle (case closed)
 1. On device: Settings → Firmware Update (shows "BOOTLOADER MODE" screen)
 2. On host: `cd firmware && make flash`
