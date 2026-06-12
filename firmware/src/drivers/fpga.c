@@ -1425,6 +1425,113 @@ static void fpga_acquisition_task(void *pv)
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+ * SPI3 FPGA config handshake (shared by fpga_init and `fpga reinit`)
+ *
+ * Sequence is the stock-captured order (issue-#18 Saleae capture):
+ *   [PB11 HIGH, 1ms] CS↑00 | CS↓ 05 00 CS↑00 | gap | CS↓ 12 00 CS↑00 | gap
+ *   | CS↓ 15 00 CS↑00 | CS↓ 3B <115638-byte bitstream> CS↑00
+ *   | CS↓ 3A <close> CS↑00 | CS↓00 CS↑00 | [post_close delay]
+ *   | CS↓ 01 08 CS↑ | 02 03 | 06 00 | 07 00 | 08 AD | CS↓ 03 <status×4> CS↑
+ * ═══════════════════════════════════════════════════════════════════ */
+uint8_t fpga_spi3_config_sequence(const fpga_cfg_seq_opts_t *opt)
+{
+    gpio_init_type gpio_cfg;
+    gpio_default_para_init(&gpio_cfg);
+
+    /* Keep the acquisition task off the SPI3 bus during the handshake.
+     * No-op pre-RTOS; essential when replayed live via `fpga reinit`. */
+    int sched_running = (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING);
+    if (sched_running && acq_task_handle) vTaskSuspend(acq_task_handle);
+
+    (void)FPGA_SPI->dt;                  /* Discard any stale RX data */
+    fpga.diag_spi_sts = FPGA_SPI->sts;   /* STS before handshake */
+
+    if (opt->arm_pb11) {
+        /* PB11 HIGH ~1ms before the CS pulse — stock raises it 1.0ms before
+         * the bare CS pulse and holds it HIGH through the upload (capture). */
+        gpio_cfg.gpio_pins = GPIO_PINS_11;
+        gpio_cfg.gpio_mode = GPIO_MODE_OUTPUT;
+        gpio_cfg.gpio_out_type = GPIO_OUTPUT_PUSH_PULL;
+        gpio_cfg.gpio_drive_strength = GPIO_DRIVE_STRENGTH_STRONGER;
+        gpio_init(GPIOB, &gpio_cfg);
+        GPIOB->scr = PB11_MASK;
+        fpga_scope_delay_ms(1);
+    }
+
+    SPI3_CS_DEASSERT();
+    fpga.init_hs[0] = spi3_xfer(0x00);   /* flush, clocked with CS high */
+
+    SPI3_CS_ASSERT();                    /* frame 1: cmd 0x05 */
+    fpga.init_hs[1] = spi3_xfer(0x05);
+    fpga.init_hs[2] = spi3_xfer(0x00);
+    SPI3_CS_DEASSERT();
+    fpga.init_hs[3] = spi3_xfer(0x00);
+
+    fpga_scope_delay_ms(opt->prelude_gap_ms);
+
+    SPI3_CS_ASSERT();                    /* frame 2: cmd 0x12 */
+    fpga.init_hs[4] = spi3_xfer(0x12);
+    fpga.init_hs[5] = spi3_xfer(0x00);
+    SPI3_CS_DEASSERT();
+    fpga.init_hs[6] = spi3_xfer(0x00);
+
+    fpga_scope_delay_ms(opt->prelude_gap_ms);
+
+    SPI3_CS_ASSERT();                    /* frame 3: cmd 0x15 */
+    fpga.init_hs[7] = spi3_xfer(0x15);
+    fpga.init_hs[8] = spi3_xfer(0x00);
+    SPI3_CS_DEASSERT();
+    fpga.init_hs[9] = spi3_xfer(0x00);
+
+    /* Step 7: bitstream upload — 0x3B + full table in ONE CS frame. */
+    SPI3_CS_ASSERT();
+    fpga.init_hs[10] = spi3_xfer(0x3B);  /* open upload */
+    spi3_set_br(opt->upload_br);
+    spi3_pump(fpga_h2_cal_table, NULL, FPGA_H2_CAL_TABLE_SIZE);
+    spi3_set_br(0);                      /* restore /2 (60MHz) */
+    SPI3_CS_DEASSERT();
+    fpga.init_hs[11] = spi3_xfer(0x00);
+    fpga.h2_bytes_sent = FPGA_H2_CAL_TABLE_SIZE;
+    fpga.h2_upload_done = 1;
+
+    /* Step 7b: close/commit — 0x3A in its own CS-LOW frame, then a flush. */
+    SPI3_CS_ASSERT();
+    spi3_xfer(0x3A);
+    fpga.h2_close_status = spi3_xfer(0x00);  /* stock returns 0xF8 (accepted) */
+    SPI3_CS_DEASSERT();
+    spi3_xfer(0x00);
+
+    SPI3_CS_ASSERT();
+    spi3_xfer(0x00);
+    SPI3_CS_DEASSERT();
+    spi3_xfer(0x00);
+
+    /* Step 7c: post-upload scope config (5 register writes + status read). */
+    fpga_scope_delay_ms(opt->post_close_ms);
+
+    static const uint8_t scope_cfg[][2] = {
+        { 0x01, 0x08 }, { 0x02, 0x03 }, { 0x06, 0x00 },
+        { 0x07, 0x00 }, { 0x08, 0xAD },
+    };
+    for (unsigned i = 0; i < sizeof(scope_cfg) / sizeof(scope_cfg[0]); i++) {
+        SPI3_CS_ASSERT();
+        spi3_xfer(scope_cfg[i][0]);
+        spi3_xfer(scope_cfg[i][1]);
+        SPI3_CS_DEASSERT();
+    }
+
+    SPI3_CS_ASSERT();
+    spi3_xfer(0x03);                          /* status read */
+    for (unsigned i = 0; i < 4; i++)
+        fpga.scope_status[i] = spi3_xfer(0xFF);
+    SPI3_CS_DEASSERT();
+
+    if (sched_running && acq_task_handle) vTaskResume(acq_task_handle);
+
+    return fpga.h2_close_status;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
  * Initialization
  * ═══════════════════════════════════════════════════════════════════ */
 
@@ -1735,116 +1842,16 @@ void fpga_init(void)
      * spi3_pump is the gap-free equivalent for the bulk stream.
      * --------------------------------------------------------------- */
 
-    (void)FPGA_SPI->dt;  /* Discard any stale RX data */
-    fpga.diag_spi_sts = FPGA_SPI->sts;  /* STS before handshake */
-
-    /* PB11 HIGH ~1ms before the CS pulse — ground truth from the
-     * issue-#18 Saleae capture of a stock boot: PB11 sits LOW from
-     * power-on and stock raises it 1.0ms before the bare CS pulse,
-     * holding it HIGH through the whole upload. (The old "defer to
-     * after upload, FPGA pull-up reads floating as HIGH" theory is
-     * disproven by the capture.) */
-    gpio_cfg.gpio_pins = GPIO_PINS_11;
-    gpio_cfg.gpio_mode = GPIO_MODE_OUTPUT;
-    gpio_cfg.gpio_out_type = GPIO_OUTPUT_PUSH_PULL;
-    gpio_cfg.gpio_drive_strength = GPIO_DRIVE_STRENGTH_STRONGER;
-    gpio_init(GPIOB, &gpio_cfg);
-    GPIOB->scr = PB11_MASK;  /* PB11 HIGH — FPGA active */
-    systick_delay_ms(1);
-
-    SPI3_CS_DEASSERT();
-    fpga.init_hs[0] = spi3_xfer(0x00);   /* flush, clocked with CS high */
-
-    SPI3_CS_ASSERT();                    /* frame 1: cmd 0x05 */
-    fpga.init_hs[1] = spi3_xfer(0x05);
-    fpga.init_hs[2] = spi3_xfer(0x00);
-    SPI3_CS_DEASSERT();
-    fpga.init_hs[3] = spi3_xfer(0x00);
-
-    systick_delay_ms(100);
-
-    SPI3_CS_ASSERT();                    /* frame 2: cmd 0x12 */
-    fpga.init_hs[4] = spi3_xfer(0x12);
-    fpga.init_hs[5] = spi3_xfer(0x00);
-    SPI3_CS_DEASSERT();
-    fpga.init_hs[6] = spi3_xfer(0x00);
-
-    systick_delay_ms(100);
-
-    SPI3_CS_ASSERT();                    /* frame 3: cmd 0x15 */
-    fpga.init_hs[7] = spi3_xfer(0x15);
-    fpga.init_hs[8] = spi3_xfer(0x00);
-    SPI3_CS_DEASSERT();
-    fpga.init_hs[9] = spi3_xfer(0x00);
-
-    /* ---------------------------------------------------------------
-     * Step 7: FPGA bitstream upload — 0x3B + full table in ONE CS frame
-     * (no delay between frame 3 and this in stock). Partial uploads
-     * cannot work: the stream carries per-frame CRC16s and the FPGA
-     * config logic validates the whole image.
-     * --------------------------------------------------------------- */
-    SPI3_CS_ASSERT();
-    fpga.init_hs[10] = spi3_xfer(0x3B);  /* open upload */
-    spi3_set_br(SPI3_UPLOAD_BR);         /* slow the bulk phase (SI test) */
-    spi3_pump(fpga_h2_cal_table, NULL, FPGA_H2_CAL_TABLE_SIZE);
-    spi3_set_br(0);                      /* restore /2 (60MHz) */
-    SPI3_CS_DEASSERT();
-    fpga.init_hs[11] = spi3_xfer(0x00);
-    fpga.h2_bytes_sent = FPGA_H2_CAL_TABLE_SIZE;
-    fpga.h2_upload_done = 1;
-
-    /* ---------------------------------------------------------------
-     * Step 7b: close/commit — 0x3A in its own CS-LOW frame (NOT with
-     * CS high as previously coded), then a final CS-LOW flush frame.
-     * Stock idles with CS HIGH afterwards.
-     * --------------------------------------------------------------- */
-    SPI3_CS_ASSERT();
-    spi3_xfer(0x3A);
-    fpga.h2_close_status = spi3_xfer(0x00);  /* stock boot returns 0xF8 here
-                                              * (issue-#18 capture, win 5) —
-                                              * config-accepted indicator */
-    SPI3_CS_DEASSERT();
-    spi3_xfer(0x00);
-
-    SPI3_CS_ASSERT();
-    spi3_xfer(0x00);
-    SPI3_CS_DEASSERT();
-    spi3_xfer(0x00);
-
-    /* ---------------------------------------------------------------
-     * Step 7c: post-upload SPI3 scope config — from the issue-#18
-     * Saleae capture of a stock boot. ~600ms after the 0x3A close,
-     * stock sends five 2-byte register writes back-to-back (each in
-     * its own CS-LOW window, NO dummy bytes between), then a 5-byte
-     * status read:
-     *
-     *   CS↓ 01 08 CS↑ | CS↓ 02 03 CS↑ | CS↓ 06 00 CS↑
-     *   CS↓ 07 00 CS↑ | CS↓ 08 AD CS↑
-     *   CS↓ 03 FF FF FF FF CS↑   → MISO 00 01 42 2E 2E on stock
-     *
-     * Only after this does the acquisition loop start (0x04/0x05
-     * 1026-byte channel reads). Leading hypothesis: THIS is what arms
-     * the PC0 data-ready gate.
-     * --------------------------------------------------------------- */
-    systick_delay_ms(600);
-
-    static const uint8_t scope_cfg[][2] = {
-        { 0x01, 0x08 }, { 0x02, 0x03 }, { 0x06, 0x00 },
-        { 0x07, 0x00 }, { 0x08, 0xAD },
-    };
-    for (unsigned i = 0; i < sizeof(scope_cfg) / sizeof(scope_cfg[0]); i++) {
-        SPI3_CS_ASSERT();
-        spi3_xfer(scope_cfg[i][0]);
-        spi3_xfer(scope_cfg[i][1]);
-        SPI3_CS_DEASSERT();
-    }
-
-    SPI3_CS_ASSERT();
-    spi3_xfer(0x03);                          /* status read */
-    for (unsigned i = 0; i < 4; i++) {
-        fpga.scope_status[i] = spi3_xfer(0xFF);
-    }
-    SPI3_CS_DEASSERT();
+    /* The full PB11-arm → prelude → bitstream upload → close → scope-config
+     * handshake now lives in fpga_spi3_config_sequence() so the debug shell
+     * (`fpga reinit`) can replay it on demand for fast iteration without a
+     * reflash. Parameters let us sweep the variables under investigation. */
+    fpga_spi3_config_sequence(&(fpga_cfg_seq_opts_t){
+        .upload_br      = SPI3_UPLOAD_BR,
+        .prelude_gap_ms = 100,
+        .post_close_ms  = 600,
+        .arm_pb11       = 1,
+    });
 
     /* USART boot commands (0x01,0x02,0x06,0x07,0x08) now sent in
      * Step 3b, BEFORE the SPI3 phase — stock-validated Phase 4 order. */

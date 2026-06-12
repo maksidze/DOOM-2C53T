@@ -211,6 +211,22 @@ typedef struct {
 /* Global FPGA state (defined in fpga.c) */
 extern fpga_state_t fpga;
 
+/* Tunable knobs for the SPI3 config handshake (prelude + bitstream upload +
+ * close + scope-config). Exposed so the debug shell can sweep them live via
+ * `fpga reinit` without reflashing — chasing why our upload activates the
+ * FPGA slave but never reaches stock's configured state (0x3A close F8,
+ * 0x03 status 00 01 42 2E). See SPI3_STOCK_BOOT_CAPTURE_ANALYSIS.md. */
+typedef struct {
+    uint32_t upload_br;       /* SPI3 baud divider for the 0x3B bulk phase (0=/2) */
+    uint32_t prelude_gap_ms;  /* gap after each 05/12/15 prelude frame (stock ~100) */
+    uint32_t post_close_ms;   /* delay after 0x3A close before scope-config (stock ~600) */
+    uint8_t  arm_pb11;        /* 1 = drive PB11 HIGH before the handshake */
+} fpga_cfg_seq_opts_t;
+
+/* Run the full SPI3 config handshake. Returns the 0x3A close status byte
+ * (stock: 0xF8). Fills fpga.init_hs[], fpga.h2_close_status, fpga.scope_status[]. */
+uint8_t fpga_spi3_config_sequence(const fpga_cfg_seq_opts_t *opt);
+
 /* ═══════════════════════════════════════════════════════════════════
  * API
  * ═══════════════════════════════════════════════════════════════════ */

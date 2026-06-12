@@ -428,6 +428,7 @@ static void cmd_help(void)
         "spi3 read [len]                 Raw SPI3 read + hex dump\r\n"
         "spi3 xfer <hex...>              Send arbitrary MOSI bytes, dump MISO\r\n"
         "spi3 seq <b..> | <b..>          xfer w/ mid-sequence CS pulse at '|'\r\n"
+        "fpga reinit [br] [gap] [close]   Replay SPI3 config handshake + report\r\n"
         "spi3 acqread                    Read CH1/CH2 via real 0x04/0x05 protocol\r\n"
         "spi3 acqtest                    Decomposer Phase 20 validation test\r\n"
         "spi3 h2verify                   Re-upload H2 + capture FPGA responses\r\n"
@@ -1834,6 +1835,44 @@ static void cmd_spi3_acqread(void)
     usb_send_str("(span>0 = live signal; span=0 = flat. Feed siggen->CH1 to verify.)\r\n");
 }
 
+/* fpga reinit [br] [prelude_gap_ms] [post_close_ms] — replay the full SPI3
+ * config handshake on demand (prelude → 0x3B bitstream → 0x3A close → scope
+ * config) and report the result. Lets us sweep the handshake parameters in
+ * seconds without reflashing, chasing why our upload activates the FPGA slave
+ * but never reaches stock's configured state (close F8 / status 00 01 42 2E).
+ * Defaults match the stock-captured timing: br=0 (/2), gap=100ms, close=600ms. */
+static void cmd_fpga_reinit(const char *args)
+{
+    fpga_cfg_seq_opts_t opt = {
+        .upload_br = 0, .prelude_gap_ms = 100, .post_close_ms = 600, .arm_pb11 = 1,
+    };
+    char buf[80];
+    if (args && *args) {
+        if (strlen(args) >= sizeof(buf)) { usb_send_str("ERR: line too long\r\n"); return; }
+        strcpy(buf, args);
+        char *save = NULL;
+        char *t0 = strtok_r(buf, " \t", &save);
+        char *t1 = t0 ? strtok_r(NULL, " \t", &save) : NULL;
+        char *t2 = t1 ? strtok_r(NULL, " \t", &save) : NULL;
+        if (t0) opt.upload_br      = (uint32_t)strtoul(t0, NULL, 0);
+        if (t1) opt.prelude_gap_ms = (uint32_t)strtoul(t1, NULL, 0);
+        if (t2) opt.post_close_ms  = (uint32_t)strtoul(t2, NULL, 0);
+    }
+
+    usb_debug_printf("reinit: br=%lu prelude_gap=%lums post_close=%lums\r\n",
+                     opt.upload_br, opt.prelude_gap_ms, opt.post_close_ms);
+
+    uint8_t close = fpga_spi3_config_sequence(&opt);
+
+    usb_debug_printf("0x3A close: %02X (stock F8)\r\n", close);
+    usb_debug_printf("0x03 status: %02X %02X %02X %02X (stock 00 01 42 2E)\r\n",
+                     fpga.scope_status[0], fpga.scope_status[1],
+                     fpga.scope_status[2], fpga.scope_status[3]);
+    usb_send_str("--- acqread after reinit ---\r\n");
+    cmd_spi3_acqread_one(0x04);
+    cmd_spi3_acqread_one(0x05);
+}
+
 /* spi3 seq <bytes> | <bytes> [| ...] — like "spi3 xfer" but pulse CS (PB6
  * HIGH then LOW, ~tens of us inside this one handler) at each "|" separator.
  * Reproduces ripcord's cmd-09 pattern "09 FF FF | 0A FF FF", where a
@@ -1989,6 +2028,8 @@ static void dispatch_command(char *line)
         cmd_fpga_scope_trig(line + 16);
     } else if (strncmp(line, "fpga acq", 8) == 0) {
         cmd_fpga_acq(line[8] == ' ' ? line + 9 : "");
+    } else if (strncmp(line, "fpga reinit", 11) == 0) {
+        cmd_fpga_reinit(line[11] == ' ' ? line + 12 : "");
     } else if (strncmp(line, "spi3 xfer", 9) == 0) {
         cmd_spi3_xfer(line[9] == ' ' ? line + 10 : "");
     } else if (strncmp(line, "spi3 seq", 8) == 0) {
