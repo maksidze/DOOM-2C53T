@@ -511,11 +511,16 @@ static void cmd_status(void)
     );
 
     usb_debug_printf(
-        "\r\n=== H2 Cal Upload ===\r\n"
+        "\r\n=== H2 Bitstream Upload ===\r\n"
         "Bytes sent: %lu / 115638\r\n"
-        "Upload done: %s\r\n",
+        "Upload done: %s\r\n"
+        "0x3A close status: %02X (stock: F8)\r\n"
+        "0x03 scope status: %02X %02X %02X %02X (stock: 00 01 42 2E)\r\n",
         fpga.h2_bytes_sent,
-        fpga.h2_upload_done ? "YES" : "NO"
+        fpga.h2_upload_done ? "YES" : "NO",
+        fpga.h2_close_status,
+        fpga.scope_status[0], fpga.scope_status[1],
+        fpga.scope_status[2], fpga.scope_status[3]
     );
 
     fpga_stock_diag_print();

@@ -1538,14 +1538,24 @@ void fpga_init(void)
     systick_delay_ms(2000);
 
     /* ---------------------------------------------------------------
-     * USART boot commands — DEFERRED to after SPI3 upload
+     * Step 3b: USART boot commands — sent BEFORE the SPI3 phase
      *
-     * Stock firmware (ripcord disassembly of FUN_08027a50) sends USART
-     * commands 1, 2, 6, 7, 8 AFTER the entire SPI3 handshake + H2
-     * upload + post-upload cleanup completes. They are queued via
-     * xQueueSend at addresses 0x0802ADCE+, after the last SPI3_DT
-     * access at 0x0802ADC6.
+     * Stock-validated order: master init Phase 4 (inline USART cmds at
+     * 0x08025D96) precedes the SPI3 phase (0x08026540). Moved here
+     * 2026-06-10 after the framed-upload-only experiment left PC0
+     * unarmed; the prior after-upload order came from the debunked
+     * FUN_08027a50 reading (see docs/fpga_bitstream_replay_plan.md).
      * --------------------------------------------------------------- */
+    usart2_send_cmd(0x00, FPGA_CMD_INIT_01);  /* 0x01: Channel init */
+    systick_delay_ms(50);
+    usart2_send_cmd(0x00, FPGA_CMD_INIT_02);  /* 0x02: Signal gen setup */
+    systick_delay_ms(50);
+    usart2_send_cmd(0x00, FPGA_CMD_INIT_06);  /* 0x06: Signal gen setup */
+    systick_delay_ms(50);
+    usart2_send_cmd(0x00, FPGA_CMD_INIT_07);  /* 0x07: Meter probe detect */
+    systick_delay_ms(50);
+    usart2_send_cmd(0x00, FPGA_CMD_INIT_08);  /* 0x08: Meter configure */
+    systick_delay_ms(100);
 
     /* ---------------------------------------------------------------
      * Step 4: SPI3 peripheral init — Mode 3, Master, /2 prescaler
@@ -1671,148 +1681,150 @@ void fpga_init(void)
     systick_delay_ms(100);
 
     /* ---------------------------------------------------------------
-     * Step 6: SPI3 FPGA handshake — 11 bytes in 3 groups
+     * Step 6: SPI3 FPGA handshake — CS-framed commands (stock-faithful)
      *
-     * Byte-accurate disassembly (2026-04-09) of FUN_08027a50 from
-     * objdump on raw binary. The Ghidra decompiler had dropped all
-     * SPI3_DT write values (treats volatile MMIO stores as dead).
+     * GROUND-TRUTHED 2026-06-10 from arm-none-eabi-objdump of the raw
+     * stock V1.2.0 binary. The sequence lives in master init
+     * (FUN_08023A50) at 0x0802676E–0x08026D8x; the bulk-upload loop at
+     * 0x08026B28 occurs exactly once in the image. Register tracking:
+     *   r4 = 0x40011000 (GPIOC base), lr = 0xFFFFFC10, ip = 0xFFFFFC14
+     *   [r4,lr] = 0x40010C10 = GPIOB_BSRR → PB6 HIGH = CS DEASSERT
+     *   [r4,ip] = 0x40010C14 = GPIOB_BRR  → PB6 LOW  = CS ASSERT
      *
-     * Stock sends 11 bytes as a continuous stream — NO CS toggles
-     * between groups, only delays. The prior "2 bytes per CS frame"
-     * was from Unicorn trace which also missed the movs immediates.
+     * This INVERTS the CS polarity claimed by
+     * SPI3_HANDSHAKE_BYTE_ACCURATE.md (which also mis-attributed the
+     * code to FUN_08027a50 — that doc's warmup bursts and held-low CS
+     * are not in the stock image). Stock frames EACH command in its own
+     * CS-LOW window and clocks one dummy byte with CS HIGH in between:
      *
-     * Group 1: 00 05 00 00   (~100ms delay)
-     * Group 2: 12 00 00      (calibrated delay)
-     * Group 3: 15 00 00 3B
+     *   CS↑ 00 | CS↓ 05 00 CS↑ 00 | ~100ms
+     *          | CS↓ 12 00 CS↑ 00 | ~100ms
+     *          | CS↓ 15 00 CS↑ 00 |
+     *          | CS↓ 3B <115,638-byte bitstream> CS↑ 00
+     *          | CS↓ 3A 00 CS↑ 00 | CS↓ 00 CS↑ 00
      *
-     * See: SPI3_HANDSHAKE_BYTE_ACCURATE.md
+     * The H2 blob is the Gowin FPGA bitstream, not a cal table — same
+     * 0x3B/0x3A bracket, size ±1 byte, and 160-byte frame structure as
+     * the working rosenrot00/OpenScope-2C23T HW4 loader. See
+     * analysis_v120/h2_extracted/h2_is_gowin_bitstream_2c23t_evidence.md
+     * and docs/fpga_bitstream_replay_plan.md.
+     *
+     * Every stock byte is a full-duplex polled exchange (wait TXE →
+     * write → wait RXNE → read); spi3_xfer matches that exactly, and
+     * spi3_pump is the gap-free equivalent for the bulk stream.
      * --------------------------------------------------------------- */
 
     (void)FPGA_SPI->dt;  /* Discard any stale RX data */
     fpga.diag_spi_sts = FPGA_SPI->sts;  /* STS before handshake */
 
-    /* Assert CS for the entire handshake + bulk upload sequence.
-     * The byte-accurate disassembly tracked SPI3 register xrefs but
-     * not GPIO operations in the handshake range. Normal SPI requires
-     * CS LOW for the slave to drive MISO. Stock likely asserts CS
-     * before Group 1 and keeps it asserted through the bulk upload,
-     * then does the CS toggle dance in post-upload cleanup. */
-    SPI3_CS_ASSERT();
+    /* PB11 HIGH ~1ms before the CS pulse — ground truth from the
+     * issue-#18 Saleae capture of a stock boot: PB11 sits LOW from
+     * power-on and stock raises it 1.0ms before the bare CS pulse,
+     * holding it HIGH through the whole upload. (The old "defer to
+     * after upload, FPGA pull-up reads floating as HIGH" theory is
+     * disproven by the capture.) */
+    gpio_cfg.gpio_pins = GPIO_PINS_11;
+    gpio_cfg.gpio_mode = GPIO_MODE_OUTPUT;
+    gpio_cfg.gpio_out_type = GPIO_OUTPUT_PUSH_PULL;
+    gpio_cfg.gpio_drive_strength = GPIO_DRIVE_STRENGTH_STRONGER;
+    gpio_init(GPIOB, &gpio_cfg);
+    GPIOB->scr = PB11_MASK;  /* PB11 HIGH — FPGA active */
+    systick_delay_ms(1);
 
-    /* Warm-up clocks (per SPI3_INIT_SEQUENCE_DECODED.md finding #2).
-     *
-     * Stock clocks several dummy SPI3 exchanges with ~100ms gaps after
-     * PC6 HIGH, before the real handshake — the FPGA SPI slave appears to
-     * need SCK edges to arm its RX path before it will latch a command.
-     * We send two 4-byte bursts of 0x00 with a delay between them. The
-     * RX is discarded. Bench-tunable; if it desyncs the FPGA, remove. */
-    {
-        static const uint8_t warmup[4] = { 0x00, 0x00, 0x00, 0x00 };
-        spi3_pump(warmup, NULL, sizeof(warmup));
-        systick_delay_ms(100);
-        spi3_pump(warmup, NULL, sizeof(warmup));
-        systick_delay_ms(100);
-    }
+    SPI3_CS_DEASSERT();
+    fpga.init_hs[0] = spi3_xfer(0x00);   /* flush, clocked with CS high */
 
-    /* Group 1: sync + command 0x05 + 2 padding (double-buffered pump) */
-    {
-        static const uint8_t g1[4] = { 0x00, 0x05, 0x00, 0x00 };
-        spi3_pump(g1, &fpga.init_hs[0], sizeof(g1));
-    }
+    SPI3_CS_ASSERT();                    /* frame 1: cmd 0x05 */
+    fpga.init_hs[1] = spi3_xfer(0x05);
+    fpga.init_hs[2] = spi3_xfer(0x00);
+    SPI3_CS_DEASSERT();
+    fpga.init_hs[3] = spi3_xfer(0x00);
 
     systick_delay_ms(100);
 
-    /* Group 2: command 0x12 + 2 padding */
-    {
-        static const uint8_t g2[3] = { 0x12, 0x00, 0x00 };
-        spi3_pump(g2, &fpga.init_hs[4], sizeof(g2));
-    }
+    SPI3_CS_ASSERT();                    /* frame 2: cmd 0x12 */
+    fpga.init_hs[4] = spi3_xfer(0x12);
+    fpga.init_hs[5] = spi3_xfer(0x00);
+    SPI3_CS_DEASSERT();
+    fpga.init_hs[6] = spi3_xfer(0x00);
 
     systick_delay_ms(100);
 
-    /* Group 3: command 0x15 + 2 padding + 0x3B (begin upload) */
-    {
-        static const uint8_t g3[4] = { 0x15, 0x00, 0x00, 0x3B };
-        spi3_pump(g3, &fpga.init_hs[7], sizeof(g3));
-    }
+    SPI3_CS_ASSERT();                    /* frame 3: cmd 0x15 */
+    fpga.init_hs[7] = spi3_xfer(0x15);
+    fpga.init_hs[8] = spi3_xfer(0x00);
+    SPI3_CS_DEASSERT();
+    fpga.init_hs[9] = spi3_xfer(0x00);
 
     /* ---------------------------------------------------------------
-     * Step 7: SPI3 bulk FPGA register-init table upload
-     *
-     * Stock firmware sends 115,638 bytes from flash (0x08051D19)
-     * in 3-byte frames (38,546 iterations). Each iteration:
-     *   TX flash[offset+0], read RX
-     *   TX flash[offset+1], read RX
-     *   TX flash[offset+2], read RX
-     *   offset += 3
-     *
-     * Structure: 544 sync-framed blocks (Region A, 87,040 bytes)
-     * followed by dense coefficients (Region B, 28,598 bytes).
-     * See: analysis_v120/h2_extracted/FINDINGS.md
+     * Step 7: FPGA bitstream upload — 0x3B + full table in ONE CS frame
+     * (no delay between frame 3 and this in stock). Partial uploads
+     * cannot work: the stream carries per-frame CRC16s and the FPGA
+     * config logic validates the whole image.
      * --------------------------------------------------------------- */
-
-    /* Stream the entire 115,638-byte table back-to-back via the
-     * double-buffered pump. The old 3-byte-frame loop used spi3_xfer per
-     * byte, which underran the TX shift register between every byte and
-     * clock-stretched the whole 115KB upload (issue #11). The bytes are
-     * contiguous in the table, so a single pump sends them gap-free. */
+    SPI3_CS_ASSERT();
+    fpga.init_hs[10] = spi3_xfer(0x3B);  /* open upload */
     spi3_pump(fpga_h2_cal_table, NULL, FPGA_H2_CAL_TABLE_SIZE);
+    SPI3_CS_DEASSERT();
+    fpga.init_hs[11] = spi3_xfer(0x00);
     fpga.h2_bytes_sent = FPGA_H2_CAL_TABLE_SIZE;
     fpga.h2_upload_done = 1;
 
     /* ---------------------------------------------------------------
-     * Step 7b: Post-upload cleanup — 3-phase CS toggle dance
-     *
-     * Stock firmware (byte-accurate disassembly, 2026-04-09):
-     *   CS_LO → TX 0x00 → CS_HI
-     *   TX 0x3A (with CS HIGH!) → TX 0x00
-     *   CS_LO → TX 0x00 → CS_HI
-     *   TX 0x00
-     *   CS_LO → TX 0x00 (flush)
-     *
-     * The 0x3A "transfer complete" byte is sent with CS HIGH,
-     * suggesting the FPGA treats it as an out-of-band command.
-     * CS edges delimit framing.
+     * Step 7b: close/commit — 0x3A in its own CS-LOW frame (NOT with
+     * CS high as previously coded), then a final CS-LOW flush frame.
+     * Stock idles with CS HIGH afterwards.
      * --------------------------------------------------------------- */
     SPI3_CS_ASSERT();
-    spi3_xfer(0x00);
+    spi3_xfer(0x3A);
+    fpga.h2_close_status = spi3_xfer(0x00);  /* stock boot returns 0xF8 here
+                                              * (issue-#18 capture, win 5) —
+                                              * config-accepted indicator */
     SPI3_CS_DEASSERT();
-
-    spi3_xfer(0x3A);   /* End/commit — sent with CS HIGH */
     spi3_xfer(0x00);
 
     SPI3_CS_ASSERT();
     spi3_xfer(0x00);
     SPI3_CS_DEASSERT();
-
     spi3_xfer(0x00);
-
-    SPI3_CS_ASSERT();
-    spi3_xfer(0x00);   /* Final flush */
-
-    systick_delay_ms(50);  /* Let FPGA process the table */
 
     /* ---------------------------------------------------------------
-     * Step 7c: USART boot commands — sent AFTER SPI3 upload
+     * Step 7c: post-upload SPI3 scope config — from the issue-#18
+     * Saleae capture of a stock boot. ~600ms after the 0x3A close,
+     * stock sends five 2-byte register writes back-to-back (each in
+     * its own CS-LOW window, NO dummy bytes between), then a 5-byte
+     * status read:
      *
-     * Stock firmware (FUN_08027a50) queues these via xQueueSend at
-     * 0x0802ADCE-0x0802ADDA, after all SPI3 operations complete.
-     * Only commands 1, 2, 6, 7, 8 — no 3/4/5 in the stock boot.
+     *   CS↓ 01 08 CS↑ | CS↓ 02 03 CS↑ | CS↓ 06 00 CS↑
+     *   CS↓ 07 00 CS↑ | CS↓ 08 AD CS↑
+     *   CS↓ 03 FF FF FF FF CS↑   → MISO 00 01 42 2E 2E on stock
+     *
+     * Only after this does the acquisition loop start (0x04/0x05
+     * 1026-byte channel reads). Leading hypothesis: THIS is what arms
+     * the PC0 data-ready gate.
      * --------------------------------------------------------------- */
-    usart2_send_cmd(0x00, FPGA_CMD_INIT_01);  /* 0x01: Channel init */
-    systick_delay_ms(50);
+    systick_delay_ms(600);
 
-    usart2_send_cmd(0x00, FPGA_CMD_INIT_02);  /* 0x02: Signal gen setup */
-    systick_delay_ms(50);
+    static const uint8_t scope_cfg[][2] = {
+        { 0x01, 0x08 }, { 0x02, 0x03 }, { 0x06, 0x00 },
+        { 0x07, 0x00 }, { 0x08, 0xAD },
+    };
+    for (unsigned i = 0; i < sizeof(scope_cfg) / sizeof(scope_cfg[0]); i++) {
+        SPI3_CS_ASSERT();
+        spi3_xfer(scope_cfg[i][0]);
+        spi3_xfer(scope_cfg[i][1]);
+        SPI3_CS_DEASSERT();
+    }
 
-    usart2_send_cmd(0x00, FPGA_CMD_INIT_06);  /* 0x06: Signal gen setup */
-    systick_delay_ms(50);
+    SPI3_CS_ASSERT();
+    spi3_xfer(0x03);                          /* status read */
+    for (unsigned i = 0; i < 4; i++) {
+        fpga.scope_status[i] = spi3_xfer(0xFF);
+    }
+    SPI3_CS_DEASSERT();
 
-    usart2_send_cmd(0x00, FPGA_CMD_INIT_07);  /* 0x07: Meter probe detect */
-    systick_delay_ms(50);
-
-    usart2_send_cmd(0x00, FPGA_CMD_INIT_08);  /* 0x08: Meter configure */
-    systick_delay_ms(100);
+    /* USART boot commands (0x01,0x02,0x06,0x07,0x08) now sent in
+     * Step 3b, BEFORE the SPI3 phase — stock-validated Phase 4 order. */
 
     /* ---------------------------------------------------------------
      * Step 8: Analog frontend + Meter IC activation
@@ -1926,22 +1938,8 @@ void fpga_init(void)
     usart2_send_cmd(0x00, FPGA_CMD_COUPLING);    /* 0x1E: coupling/BW */
     systick_delay_ms(50);
 
-    /* ---------------------------------------------------------------
-     * Step 9b: Configure and set PB11 HIGH — FPGA active mode
-     *
-     * PB11 gpio_init is intentionally deferred to HERE, not before
-     * SPI3 init. On reset, PB11 is floating input. If the FPGA has
-     * an internal pull-up, floating = HIGH = active mode, which is
-     * the state during stock firmware's SPI3 upload. Configuring
-     * PB11 as output push-pull before SPI3 drives it LOW, which
-     * may gate the FPGA's SPI slave interface (MISO stuck 0xFF).
-     * --------------------------------------------------------------- */
-    gpio_cfg.gpio_pins = GPIO_PINS_11;
-    gpio_cfg.gpio_mode = GPIO_MODE_OUTPUT;
-    gpio_cfg.gpio_out_type = GPIO_OUTPUT_PUSH_PULL;
-    gpio_cfg.gpio_drive_strength = GPIO_DRIVE_STRENGTH_STRONGER;
-    gpio_init(GPIOB, &gpio_cfg);
-    GPIOB->scr = PB11_MASK;  /* PB11 HIGH — FPGA active */
+    /* Step 9b removed: PB11 is now armed immediately before the SPI3
+     * handshake (stock-captured order, issue-#18 capture). */
 
     /* ---------------------------------------------------------------
      * Step 10: Post-init SPI3 probe

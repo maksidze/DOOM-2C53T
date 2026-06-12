@@ -193,9 +193,12 @@ typedef struct {
     volatile uint32_t diag_spi_ctrl1;      /* SPI3 CTRL1 after init */
     volatile uint32_t diag_spi_sts;        /* SPI3 STS after init */
 
-    /* H2 cal table upload diagnostic */
+    /* H2 bitstream upload diagnostic */
     volatile uint32_t h2_bytes_sent;       /* Bytes uploaded (should be 115638) */
     volatile uint8_t  h2_upload_done;      /* 1 = upload completed without error */
+    volatile uint8_t  h2_close_status;     /* MISO byte after 0x3A close (stock: 0xF8) */
+    volatile uint8_t  scope_status[4];     /* MISO from post-upload 0x03 read
+                                            * (stock boot: 00 01 42 2E — issue-#18 capture) */
 
     /* Experimental stock runtime shadow for scope-mode bench work.
      * These are NOT the original firmware RAM locations. They are a small
