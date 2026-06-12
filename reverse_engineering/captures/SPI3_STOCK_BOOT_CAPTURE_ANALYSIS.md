@@ -188,3 +188,44 @@ SRAM-program mode; on our device it doesn't take. Next leads:
    specific order/dummy-clock count) is missing/misordered on our side.
 3. Ask rosenrot00 how the GW1N enters SRAM-program mode without a reset on a
    NV-booted design (their 2C23T pulses reset; the 2C53T apparently doesn't).
+
+### Experiment 4+5 results: register reads & wire-exact prelude (2026-06-12 cont.)
+
+Added `spi3 gowin` — reads Gowin ID/USERCODE/STATUS (0x11/0x13/0x41) with
+rosenrot00's exact 2C23T framing (flush@CS-high → CS-low → opcode+3 → read 4),
+at **both** /2 (60MHz) and /256 (~470kHz).
+
+- **Register reads return 0x00000000 at BOTH clock rates.** IDCODE never reads
+  back 0x0120681B. So (a) clock rate is NOT the issue, and (b) the JTAG-style
+  SSPI register reads simply **don't function on the 2C53T's FPGA** — consistent
+  with stock never issuing them (capture shows only 05/12/15, and stock's only
+  working read is `0x03` AFTER config). The read path is a dead end for probing
+  FPGA state; we're blind to its internals from the MCU side.
+
+- **Wire-exact prelude** (`fpga.c` rewrite): the old config sequence clocked
+  flush `0x00` bytes with **CS HIGH** between every frame — 8 stray SCK edges per
+  gap that, if the GW1N SSPI shift register isn't strictly CS-gated, desync the
+  command parser. The capture clocks NOTHING with CS high. Rewrote to match: a
+  bare CS pulse (CS low→high, zero clocks) to open, then every byte inside a
+  CS-LOW frame, no CS-high clocking anywhere.
+  - Result: `0x03` status byte0 went **0x80 → 0x00** (stuck bank bit cleared —
+    now matches stock's byte0). Real state change. BUT close still `00`, bytes
+    1-3 still `00` (stock `01 42 2E`), samples still all-zero. Config mode still
+    not entered.
+
+**Bottom line: every MCU-side hypothesis is now eliminated** — bytes ✓, SPI
+mode ✓, clock rate ✓, 3 reset pins ✓ (neg), register reads (dead), CS framing ✓
+(now wire-exact), PB6 confirmed GPIO (not NSS), SPI3 CTRL1/CTRL2 match stock.
+The FPGA still drives MISO low through 0x3B and never enters config-receive
+mode. The decompiled master-init (phase2, the misdecoded region) shows **no
+FPGA reset/PROGRAMN toggle** near the upload — only PC6=H, PB11=H — matching the
+capture. So no hidden reset pin in stock either.
+
+**The blind-iteration wall is reached.** The only assumption left unverified is
+whether OUR wire actually matches stock's at the prelude/upload — and that can
+only be settled by **capturing our own SPI3** (slow the clock to ≤~1MHz, probe
+PB3/PB4/PB5/PB6 + PC6 + PB11 with the HiLetgo 24MHz analyzer) and diffing
+against stock's capture edge-for-edge. Secondary untested idea: stock's USART
+meter traffic (t=2.7–3.6s) PRECEDES the SPI config — a specific USART command
+may tell the NV design to release the fabric for reconfig; worth replaying the
+exact pre-config USART sequence before 0x3B.

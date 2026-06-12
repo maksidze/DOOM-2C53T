@@ -1476,53 +1476,62 @@ uint8_t fpga_spi3_config_sequence(const fpga_cfg_seq_opts_t *opt)
         fpga_scope_delay_ms(1);
     }
 
-    SPI3_CS_DEASSERT();
-    fpga.init_hs[0] = spi3_xfer(0x00);   /* flush, clocked with CS high */
+    /* WIRE-EXACT to the issue-#18 stock capture. The capture clocks NOTHING
+     * while CS is high; every byte sits inside a CS-LOW frame. Our previous
+     * version clocked flush 0x00 bytes with CS HIGH between frames — 8 stray
+     * SCK edges per gap that, if the GW1N SSPI shift register isn't strictly
+     * CS-gated, desync the command parser so CONFIG_ENABLE (0x15) never lands.
+     * Removed entirely below. See SPI3_STOCK_BOOT_CAPTURE_ANALYSIS.md. */
 
-    SPI3_CS_ASSERT();                    /* frame 1: cmd 0x05 */
+    /* [0] bare CS pulse — CS low→high with ZERO clocks (stock t=3.6082).
+     * A CS assertion is the SSPI frame-sync that resets the command FSM. */
+    SPI3_CS_DEASSERT();
+    (void)FPGA_SPI->dt;                  /* drain stale RX without clocking */
+    SPI3_CS_ASSERT();
+    for (volatile int d = 0; d < 50; d++) { __asm__ volatile("nop"); }
+    SPI3_CS_DEASSERT();
+    fpga_scope_delay_ms(opt->prelude_gap_ms);   /* stock waits ~100ms → 0x05 */
+
+    /* [1] 05 00 */
+    SPI3_CS_ASSERT();
     fpga.init_hs[1] = spi3_xfer(0x05);
     fpga.init_hs[2] = spi3_xfer(0x00);
     SPI3_CS_DEASSERT();
-    fpga.init_hs[3] = spi3_xfer(0x00);
-
     fpga_scope_delay_ms(opt->prelude_gap_ms);
 
-    SPI3_CS_ASSERT();                    /* frame 2: cmd 0x12 */
+    /* [2] 12 00 */
+    SPI3_CS_ASSERT();
     fpga.init_hs[4] = spi3_xfer(0x12);
     fpga.init_hs[5] = spi3_xfer(0x00);
     SPI3_CS_DEASSERT();
-    fpga.init_hs[6] = spi3_xfer(0x00);
-
     fpga_scope_delay_ms(opt->prelude_gap_ms);
 
-    SPI3_CS_ASSERT();                    /* frame 3: cmd 0x15 */
+    /* [3] 15 00 — stock proceeds to 0x3B just 8µs later, no gap */
+    SPI3_CS_ASSERT();
     fpga.init_hs[7] = spi3_xfer(0x15);
     fpga.init_hs[8] = spi3_xfer(0x00);
     SPI3_CS_DEASSERT();
-    fpga.init_hs[9] = spi3_xfer(0x00);
 
-    /* Step 7: bitstream upload — 0x3B + full table in ONE CS frame. */
+    /* [4] bitstream upload — 0x3B + full table in ONE CS frame. */
     SPI3_CS_ASSERT();
     fpga.init_hs[10] = spi3_xfer(0x3B);  /* open upload */
     spi3_set_br(opt->upload_br);
     spi3_pump(fpga_h2_cal_table, NULL, FPGA_H2_CAL_TABLE_SIZE);
     spi3_set_br(0);                      /* restore /2 (60MHz) */
     SPI3_CS_DEASSERT();
-    fpga.init_hs[11] = spi3_xfer(0x00);
     fpga.h2_bytes_sent = FPGA_H2_CAL_TABLE_SIZE;
     fpga.h2_upload_done = 1;
 
-    /* Step 7b: close/commit — 0x3A in its own CS-LOW frame, then a flush. */
+    /* [5] 3A 00 — close/commit in its own CS-LOW frame. Stock → 0xF8. */
     SPI3_CS_ASSERT();
     spi3_xfer(0x3A);
-    fpga.h2_close_status = spi3_xfer(0x00);  /* stock returns 0xF8 (accepted) */
+    fpga.h2_close_status = spi3_xfer(0x00);
     SPI3_CS_DEASSERT();
-    spi3_xfer(0x00);
 
+    /* [6] single 0x00 byte, CS LOW (stock flush frame at t=4.4484). */
     SPI3_CS_ASSERT();
     spi3_xfer(0x00);
     SPI3_CS_DEASSERT();
-    spi3_xfer(0x00);
 
     /* Step 7c: post-upload scope config (5 register writes + status read). */
     fpga_scope_delay_ms(opt->post_close_ms);

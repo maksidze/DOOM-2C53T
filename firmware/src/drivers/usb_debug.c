@@ -430,6 +430,7 @@ static void cmd_help(void)
         "spi3 seq <b..> | <b..>          xfer w/ mid-sequence CS pulse at '|'\r\n"
         "fpga reinit [br] [gap] [close]   Replay SPI3 config handshake + report\r\n"
         "spi3 acqread                    Read CH1/CH2 via real 0x04/0x05 protocol\r\n"
+        "spi3 gowin                      Read+decode Gowin ID/USERCODE/STATUS regs\r\n"
         "spi3 acqtest                    Decomposer Phase 20 validation test\r\n"
         "spi3 h2verify                   Re-upload H2 + capture FPGA responses\r\n"
         "reboot bootloader               Reboot into USB HID updater\r\n"
@@ -1835,6 +1836,119 @@ static void cmd_spi3_acqread(void)
     usb_send_str("(span>0 = live signal; span=0 = flat. Feed siggen->CH1 to verify.)\r\n");
 }
 
+/* spi3 gowin — read the Gowin SSPI ID / USERCODE / STATUS registers using
+ * rosenrot00's PROVEN-WORKING 2C23T framing and decode the status bits.
+ *
+ * Framing (per fpga_hw4_read_register32 in the 2C23T loader): one flush byte
+ * clocked with CS HIGH, then CS LOW, then opcode + 3 zero bytes, then 4 read
+ * bytes, then CS HIGH. The opcode sits in the MSB of a 32-bit "address word"
+ * (0x11<<24 etc), exactly as their read_register32(0x11000000) does.
+ *
+ * Why this matters: our `spi3 xfer 41 ...` returned 0x00000000 on a *running*
+ * NV-booted FPGA. A configured GW1N must report DONE_FINAL / GOWIN_VLD / READY
+ * in its status register — zero means either our READ FRAMING is wrong (this
+ * command tests that by also reading IDCODE, which must equal 0x0120681B for
+ * the GW1N-2) or the part is genuinely unconfigured. Either answer unblocks us.
+ *
+ * Gowin status-register bit names from openFPGALoader src/gowin.cpp. */
+static uint32_t spi3_gowin_read_reg(uint8_t opcode)
+{
+    /* flush byte with CS HIGH (CS is idle-high here) */
+    (void)spi3_raw_xfer(0x00);
+    GPIOB->clr = (1 << 6);                 /* CS assert (PB6 LOW) */
+    (void)spi3_raw_xfer(opcode);           /* opcode in MSB position */
+    (void)spi3_raw_xfer(0x00);
+    (void)spi3_raw_xfer(0x00);
+    (void)spi3_raw_xfer(0x00);
+    uint8_t b0 = spi3_raw_xfer(0x00);
+    uint8_t b1 = spi3_raw_xfer(0x00);
+    uint8_t b2 = spi3_raw_xfer(0x00);
+    uint8_t b3 = spi3_raw_xfer(0x00);
+    GPIOB->scr = (1 << 6);                 /* CS deassert (PB6 HIGH) */
+    return ((uint32_t)b0 << 24) | ((uint32_t)b1 << 16) |
+           ((uint32_t)b2 << 8) | (uint32_t)b3;
+}
+
+/* Set SPI3 baud divider on the fly (CTRL1 bits[5:3]); needs SPE off/on.
+ * br: 0=/2(60MHz) .. 7=/256(~470kHz). Returns the previous CTRL1. */
+static uint32_t spi3_set_baud(uint32_t br)
+{
+    volatile uint32_t *ctrl1 = (volatile uint32_t *)0x40003C00;
+    uint32_t prev = *ctrl1;
+    *ctrl1 &= ~(1u << 6);                                   /* SPE = 0 */
+    *ctrl1 = (*ctrl1 & ~(7u << 3)) | ((br & 7u) << 3);      /* set MDIV */
+    *ctrl1 |= (1u << 6);                                    /* SPE = 1 */
+    return prev;
+}
+
+static void cmd_spi3_gowin(void)
+{
+    static const struct { uint32_t mask; const char *name; } STATUS_BITS[] = {
+        { 1u << 0,  "CRC Error" },
+        { 1u << 1,  "Bad Command" },
+        { 1u << 2,  "ID Verify Failed" },
+        { 1u << 3,  "Timeout" },
+        { 1u << 5,  "Memory Erase" },
+        { 1u << 6,  "Preamble" },
+        { 1u << 7,  "System Edit Mode" },
+        { 1u << 8,  "Program spiFlash directly" },
+        { 1u << 10, "Non-JTAG config active" },
+        { 1u << 11, "Bypass" },
+        { 1u << 12, "Gowin VLD" },
+        { 1u << 13, "Done Final" },
+        { 1u << 14, "Security Final" },
+        { 1u << 15, "Ready" },
+        { 1u << 16, "POR" },
+        { 1u << 17, "FLASH lock" },
+    };
+
+    usb_send_str("=== Gowin SSPI registers (rosenrot00 framing) ===\r\n");
+
+    /* Read at two clock rates: /2 (60MHz, our normal) and /256 (~470kHz,
+     * closer to rosenrot00's bit-bang). If the slow read returns the real
+     * IDCODE but the fast one doesn't, the SSPI read path is clock-limited. */
+    static const struct { uint32_t br; const char *label; } SPEEDS[] = {
+        { 0u, "/2  (60MHz)" },
+        { 7u, "/256(~470kHz)" },
+    };
+
+    uint32_t saved = 0;
+    for (unsigned s = 0; s < sizeof(SPEEDS) / sizeof(SPEEDS[0]); s++) {
+        if (s == 0) saved = spi3_set_baud(SPEEDS[s].br);
+        else        (void)spi3_set_baud(SPEEDS[s].br);
+
+        uint32_t id  = spi3_gowin_read_reg(0x11);   /* READ_IDCODE   */
+        uint32_t usr = spi3_gowin_read_reg(0x13);   /* READ_USERCODE */
+        uint32_t st  = spi3_gowin_read_reg(0x41);   /* READ_STATUS   */
+
+        usb_debug_printf("\r\n[clk %s]\r\n", SPEEDS[s].label);
+        usb_debug_printf("IDCODE  (0x11): 0x%08lX  %s\r\n", id,
+                         id == 0x0120681BUL ? "== GW1N-2 OK (read path works!)"
+                                            : "!= 0x0120681B");
+        usb_debug_printf("USERCODE(0x13): 0x%08lX\r\n", usr);
+        usb_debug_printf("STATUS  (0x41): 0x%08lX\r\n", st);
+        usb_send_str("  decode:");
+        int any = 0;
+        for (unsigned i = 0; i < sizeof(STATUS_BITS) / sizeof(STATUS_BITS[0]); i++) {
+            if (st & STATUS_BITS[i].mask) {
+                usb_debug_printf(" [%s]", STATUS_BITS[i].name);
+                any = 1;
+            }
+        }
+        usb_send_str(any ? "\r\n" : " (no bits set)\r\n");
+    }
+
+    /* Restore the original CTRL1 (baud + SPE) for the rest of the system. */
+    {
+        volatile uint32_t *ctrl1 = (volatile uint32_t *)0x40003C00;
+        *ctrl1 &= ~(1u << 6);
+        *ctrl1 = saved;
+    }
+
+    usb_send_str("\r\nHealthy running FPGA expects IDCODE 0x0120681B + Done Final/VLD/Ready.\r\n"
+                 "If slow clock reads it but fast doesn't -> SSPI read path is clock-limited.\r\n");
+}
+
 /* fpga reinit [br] [prelude_gap_ms] [post_close_ms] — replay the full SPI3
  * config handshake on demand (prelude → 0x3B bitstream → 0x3A close → scope
  * config) and report the result. Lets us sweep the handshake parameters in
@@ -2051,6 +2165,8 @@ static void dispatch_command(char *line)
         cmd_reboot_bootloader();
     } else if (strcmp(line, "spi3 acqread") == 0) {
         cmd_spi3_acqread();
+    } else if (strcmp(line, "spi3 gowin") == 0) {
+        cmd_spi3_gowin();
     } else if (strcmp(line, "spi3 acqtest") == 0) {
         cmd_spi3_acqtest();
     } else if (strcmp(line, "spi3 h2verify") == 0) {
