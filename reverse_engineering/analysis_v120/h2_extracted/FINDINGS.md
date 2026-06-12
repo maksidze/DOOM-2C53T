@@ -268,3 +268,17 @@ Both the bin and the analysis report are reproducible by running
 | The table is FPGA meter calibration | **MEDIUM-HIGH** (inherited from 5-agent analysis) |
 | Region A alone is sufficient for the cal | **UNKNOWN** (to be bench-tested) |
 | It's safe to truncate to Region A on block boundary | **HIGH** (if CS is deasserted at boundary) |
+
+---
+
+## CORRECTION 2026-06-12 — extraction was off by 0x7000
+
+`h2_cal_table.bin` in this directory originally held bytes from FILE offset
+0x51D19 of the V1.2.0 binary. That was wrong: the APP is linked at 0x08007000,
+so flash 0x08051D19 = file offset **0x4AD19**. The file has been REPLACED with
+the correct extraction (sha256 5a0e73384e496bdb3b3d591b852bec2e806e70cbc71439c9829695324efd5c3b),
+verified byte-exact against a Saleae capture of a stock boot (issue #18).
+All structural statistics in this document (Region A/B split, sentinel tags,
+terminator tags) describe the OLD garbage extraction and are obsolete — the
+real stream is a standard Gowin .fs-style bitstream with preamble and IDCODE
+0x0120681B. See `reverse_engineering/captures/SPI3_STOCK_BOOT_CAPTURE_ANALYSIS.md`.

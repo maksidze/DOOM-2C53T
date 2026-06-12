@@ -43,7 +43,7 @@ These algorithms are written and unit-tested, but currently run on demo waveform
 - Screenshot capture (BMP)
 
 ### In progress
-- **FPGA SPI3 data acquisition** — root cause identified (needs PB11 HIGH, full boot command sequence, queue-driven triggering). This is the critical path to a working oscilloscope.
+- **FPGA SPI3 data acquisition** — **major breakthrough (Jun 2026).** A community logic-analyzer capture of a stock boot ([issue #18](https://github.com/DavidClawson/OpenScope-2C53T/issues/18), thanks to @maksidze) revealed that our FPGA configuration bitstream had been extracted from the wrong flash offset — we'd been uploading garbage. With the corrected 115,638-byte bitstream, the FPGA now accepts the config and the PC0 data-ready line arms for the first time. Remaining work: implement the per-channel `0x04`/`0x05` sample-read protocol the capture revealed and wire it to the waveform renderer. This is the critical path to a working oscilloscope.
 
 ## Hardware
 
@@ -211,11 +211,11 @@ No FNIRSI source code is distributed in this repository. See [reverse_engineerin
 
 The firmware is functionally complete for the UI layer, but the next milestones are blocked on hardware captures and experimentation that a single bench unit can't provide. **You don't need to write code to make a big contribution here.**
 
-### 1. Logic analyzer captures of the stock firmware boot sequence
-The FPGA needs a 115,638-byte calibration table uploaded over SPI3 at boot (commands `0x3B`/`0x3A`). We've extracted the table from the stock binary, but we need to verify the exact SPI timing and sequence against a live boot. If you have a logic analyzer (Saleae, DSLogic, even a cheap fx2lafw 24MHz) and can capture PB3/PB4/PB5/PB6 during a stock firmware power-on, that would directly unblock oscilloscope waveform display.
+### 1. ~~Logic analyzer captures of the stock firmware boot sequence~~ ✅ DONE
+**Solved June 2026** thanks to @maksidze ([issue #18](https://github.com/DavidClawson/OpenScope-2C53T/issues/18)), who patched the stock firmware's SPI prescaler to /64 and captured a full stock boot on a Saleae. That capture revealed our FPGA bitstream was extracted from the wrong file offset (we'd treated the flash address as a file offset, ignoring the `0x08007000` link base — the real bitstream is at file offset `0x4AD19`). The corrected bitstream is byte-exact against the capture and the FPGA now accepts it. Full decode: [`reverse_engineering/captures/`](reverse_engineering/captures/). Still useful: captures from **other board revisions** to confirm the bitstream and sequence generalize.
 
-### 2. FPGA command experimentation
-The FPGA currently ignores all USART TX commands from our firmware (zero echo frames). The stock firmware gets responses. If you're comfortable with serial protocols and want to help figure out what init sequence the FPGA expects before it starts listening, open an issue and we'll coordinate. See [FPGA Protocol](reverse_engineering/FPGA_PROTOCOL_COMPLETE.md) for the full command table.
+### 2. Oscilloscope sample-read implementation
+The capture revealed the post-config read protocol: per-channel 1026-byte reads with opcodes `0x04` (CH1) / `0x05` (CH2), gated on the PC0 data-ready line. We're implementing this now. If you have a 2C53T + logic analyzer and want to help characterize the runtime trigger/timebase command sequence (the part that rides on USART, which the SPI capture couldn't see), open an issue. See [FPGA Protocol](reverse_engineering/FPGA_PROTOCOL_COMPLETE.md) for the full command table.
 
 ### 3. Board variant documentation
 We've confirmed one board revision (V1.4) and one user has reported a different layout with no version marking. If your 2C53T looks different from [our photos](docs/images/), photos of your PCB (top and bottom) are extremely valuable — especially near the FPGA, SPI flash, and analog frontend.
