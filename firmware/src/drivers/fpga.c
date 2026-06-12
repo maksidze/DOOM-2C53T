@@ -251,6 +251,27 @@ static void spi3_pump(const uint8_t *tx, volatile uint8_t *rx, uint32_t n)
         rx[n - 1] = rlast;
 }
 
+/* Set the SPI3 baud-rate divider (CTRL1 bits [5:3]) on the fly. Requires
+ * toggling SPE off/on. br: 0=/2 (60MHz), 1=/4, 2=/8, 3=/16, 4=/32 ...
+ *
+ * Used to slow ONLY the 115KB 0x3B bitstream upload. Gowin SPI configuration
+ * is clock-rate agnostic (the config logic samples on clock edges, not at a
+ * fixed rate), so a slower upload is safe; the question under test is whether
+ * our gapless 60MHz pump is marginal over 115K bytes (boot-to-boot 0x3A close
+ * status varied F8/FC/00 — see SPI3_STOCK_BOOT_CAPTURE_ANALYSIS.md). */
+/* TESTED 2026-06-12 (Unit 2): /16 produced IDENTICAL behavior to /2 —
+ * close status still 00, buffers still empty. The gapless 60MHz pump is NOT
+ * the marginal link. Reverted to /2 (stock-faithful); helper kept for future
+ * sweeps. The config-completion gap is elsewhere (prelude/config-enter or a
+ * runtime command we haven't replayed). */
+#define SPI3_UPLOAD_BR  0u   /* /2 = 60MHz, matches stock */
+static void spi3_set_br(uint32_t br)
+{
+    FPGA_SPI->ctrl1 &= ~(1u << 6);              /* SPE = 0 */
+    FPGA_SPI->ctrl1 = (FPGA_SPI->ctrl1 & ~(7u << 3)) | ((br & 7u) << 3);
+    FPGA_SPI->ctrl1 |= (1u << 6);               /* SPE = 1 */
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * USART2 Byte-Level TX (used during boot, before tasks are running)
  * ═══════════════════════════════════════════════════════════════════ */
@@ -1764,7 +1785,9 @@ void fpga_init(void)
      * --------------------------------------------------------------- */
     SPI3_CS_ASSERT();
     fpga.init_hs[10] = spi3_xfer(0x3B);  /* open upload */
+    spi3_set_br(SPI3_UPLOAD_BR);         /* slow the bulk phase (SI test) */
     spi3_pump(fpga_h2_cal_table, NULL, FPGA_H2_CAL_TABLE_SIZE);
+    spi3_set_br(0);                      /* restore /2 (60MHz) */
     SPI3_CS_DEASSERT();
     fpga.init_hs[11] = spi3_xfer(0x00);
     fpga.h2_bytes_sent = FPGA_H2_CAL_TABLE_SIZE;

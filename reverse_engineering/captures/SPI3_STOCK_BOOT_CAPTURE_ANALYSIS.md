@@ -84,3 +84,65 @@ unsigned samples. CH1 (0x04) hovered ~0x4D, CH2 (0x05) drifted
 status `00 01 42 2E`-ish, and PC0 (`gpio read C 0`) should finally go LOW.
 Next change if PC0 arms: rewrite `fpga_acquisition_task` to the real
 0x04/0x05 read format.
+
+---
+
+## Bench results with corrected bitstream (2026-06-12, Unit 2)
+
+**Progress — FPGA slave is now ALIVE.** Before the fix MISO floated at 0xFF
+(slave inert, `h2verify` 0/115,638 non-FF). After: the FPGA drives MISO to
+0x00 during the upload (`h2verify` **115,638/115,638 non-FF**), the `0x3B`
+opcode returns `0x80`, the bank bit toggles between `0x04`/`0x05` reads, and
+**PC0 arms (=0)** — none of which ever happened on garbage uploads.
+
+**But not yet at stock's configured state.** Two gaps remain:
+
+| Signal | Stock | Ours | Meaning |
+|---|---|---|---|
+| `0x03` status read | `00 01 42 2E` | `80 00 00 00` | config-state regs (`01 42 2E`) not set |
+| acq read byte[2] | `01` (buffer valid) | `00` (empty) | no samples captured |
+| `0x3A` close status | `F8` (every boot) | `FC` / `00` (varies) | config result inconsistent |
+| samples | live ADC values | all `0x00` | sampling engine not running |
+
+**Leading hypothesis: the 115KB upload is marginal, not the framing.** The
+slave activates but the config doesn't reliably reach the "ready" state — the
+boot-to-boot `0x3A` variance (F8 vs FC vs 00) is the tell. Our `spi3_pump`
+clocks the bitstream gaplessly at /2 (60MHz); a signal-integrity or timing
+issue over 115K gapless bytes would corrupt enough frames to fail the Gowin
+per-frame CRC while still activating the slave.
+
+**Next experiments (priority order):**
+1. **Slow the upload clock** (/8 or /16 just for the `0x3B` bulk phase) and
+   check whether `0x3A` close reliably returns `F8`. If a slower clock fixes
+   it → timing/SI on the gapless pump. Cheap, high-value, do first.
+2. If close hits F8 but status still `00 00`: the `01 42 2E` state needs a
+   command we haven't replayed — instrument what sets it (more SPI3 writes,
+   or the USART trigger/run sequence the capture couldn't see on PA2).
+3. Only once acq byte[2]=`01`: feed siggen→CH1 and confirm `span>0`.
+
+Tool: `spi3 acqread` (per-channel 0x04/0x05 read + sample stats) and
+`spi3 xfer 03 ff ff ff ff` (status reg) added to the debug shell for this.
+
+### Experiment 1 result: upload clock is NOT the bottleneck (NEGATIVE)
+
+Slowed the 0x3B bulk phase to /16 (~7.5MHz, vs /2=60MHz). Result on Unit 2:
+**identical** — `0x3A` close still `00`, `0x03` status still `80 00 00`, acq
+buffers still all-zero. So our gapless pump was never the marginal link.
+Reverted to /2.
+
+**Revised hypothesis:** the FPGA's SPI slave activates (drives MISO, bank bit
+toggles, PC0 arms) but the config never reaches "user mode / ready" — close
+returns `00` not `F8`. Since the upload DATA is byte-exact and clock rate
+doesn't matter, the gap is most likely in the **config-enter handshake**: the
+`05 00` / `12 00` / `15 00` prelude (rosenrot00's 2C23T loader reads regs
+0x11/0x13/0x41 and writes 0x1200/0x1500 to put the FPGA into SRAM-reconfig
+mode) or a trailing requirement we're missing. Our NV-booted FPGA may already
+be running its NV config and ignoring/partially-applying the 0x3B SRAM stream
+unless correctly told to enter reconfiguration.
+
+**Better tooling needed first:** each idea currently costs a full reflash +
+IAP cycle. Next session — add a `fpga reinit [br]` shell command that re-runs
+the prelude + 0x3B upload + 0x3A close + config writes on demand and reports
+close/status, so the handshake can be swept in seconds instead of minutes.
+Then sweep: prelude variants, pre-upload register reads (0x11/0x13/0x41),
+trailing dummy clocks, and CTRL2 DMA-bit on/off.

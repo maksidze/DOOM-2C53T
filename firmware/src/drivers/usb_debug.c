@@ -428,6 +428,7 @@ static void cmd_help(void)
         "spi3 read [len]                 Raw SPI3 read + hex dump\r\n"
         "spi3 xfer <hex...>              Send arbitrary MOSI bytes, dump MISO\r\n"
         "spi3 seq <b..> | <b..>          xfer w/ mid-sequence CS pulse at '|'\r\n"
+        "spi3 acqread                    Read CH1/CH2 via real 0x04/0x05 protocol\r\n"
         "spi3 acqtest                    Decomposer Phase 20 validation test\r\n"
         "spi3 h2verify                   Re-upload H2 + capture FPGA responses\r\n"
         "reboot bootloader               Reboot into USB HID updater\r\n"
@@ -1786,6 +1787,53 @@ static void cmd_spi3_xfer(const char *args)
                      (unsigned long)nonff, (unsigned long)n, pc0_before, pc0_after);
 }
 
+/* spi3 acqread — read one acquisition frame per channel using the REAL
+ * stock protocol decoded from the issue-#18 capture: per-channel 1026-byte
+ * reads, opcode 0x04 (CH1) / 0x05 (CH2), in a single CS-LOW window each.
+ * MISO layout per frame: [resp0][resp1][resp2] then ~1023 unsigned samples.
+ * Reports PC0 before/after, the 3 status bytes, the first 16 samples, and
+ * min/max/mean of the sample region — enough to tell a real waveform from a
+ * flat line (feed the siggen into CH1 for a known signal). Read-only probe;
+ * does not touch the acquisition task. */
+static void cmd_spi3_acqread_one(uint8_t opcode)
+{
+    uint8_t first16[16];
+    uint16_t smin = 255, smax = 0;
+    uint32_t ssum = 0, scount = 0;
+
+    uint32_t pc0_before = (GPIOC->idt & 1) ? 1 : 0;
+    GPIOB->clr = (1 << 6);                 /* CS assert (LOW) */
+    uint8_t r0 = spi3_raw_xfer(opcode);    /* MISO during opcode */
+    uint8_t r1 = spi3_raw_xfer(0xFF);
+    uint8_t r2 = spi3_raw_xfer(0xFF);
+    for (uint32_t i = 0; i < 1023; i++) {  /* 3 status + 1023 = 1026-byte frame */
+        uint8_t s = spi3_raw_xfer(0xFF);
+        if (i < 16) first16[i] = s;
+        if (s < smin) smin = s;
+        if (s > smax) smax = s;
+        ssum += s;
+        scount++;
+    }
+    GPIOB->scr = (1 << 6);                 /* CS deassert (HIGH) */
+    uint32_t pc0_after = (GPIOC->idt & 1) ? 1 : 0;
+
+    usb_debug_printf("CH (0x%02X): status %02X %02X %02X  PC0 %lu->%lu\r\n",
+                     opcode, r0, r1, r2, pc0_before, pc0_after);
+    usb_send_str("  first16:");
+    for (int i = 0; i < 16; i++) usb_debug_printf(" %02X", first16[i]);
+    usb_debug_printf("\r\n  samples: min=%u max=%u mean=%lu span=%u\r\n",
+                     smin, smax, scount ? ssum / scount : 0,
+                     (unsigned)(smax - smin));
+}
+
+static void cmd_spi3_acqread(void)
+{
+    usb_send_str("=== acqread (real 0x04/0x05 protocol) ===\r\n");
+    cmd_spi3_acqread_one(0x04);
+    cmd_spi3_acqread_one(0x05);
+    usb_send_str("(span>0 = live signal; span=0 = flat. Feed siggen->CH1 to verify.)\r\n");
+}
+
 /* spi3 seq <bytes> | <bytes> [| ...] — like "spi3 xfer" but pulse CS (PB6
  * HIGH then LOW, ~tens of us inside this one handler) at each "|" separator.
  * Reproduces ripcord's cmd-09 pattern "09 FF FF | 0A FF FF", where a
@@ -1949,6 +1997,8 @@ static void dispatch_command(char *line)
         cmd_spi3_read(line[9] == ' ' ? line + 10 : "");
     } else if (strcmp(line, "reboot bootloader") == 0) {
         cmd_reboot_bootloader();
+    } else if (strcmp(line, "spi3 acqread") == 0) {
+        cmd_spi3_acqread();
     } else if (strcmp(line, "spi3 acqtest") == 0) {
         cmd_spi3_acqtest();
     } else if (strcmp(line, "spi3 h2verify") == 0) {
