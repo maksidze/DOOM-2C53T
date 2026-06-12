@@ -25,8 +25,12 @@
 #include "shared_mem.h"
 #include "fpga.h"
 #include "at32f403a_407.h"
+#include "button_scan.h"
 #include "task.h"
 #include <stdio.h>
+
+/* MENU is bit 9 in the raw button-scan state (button_scan.c). */
+#define BTN_SCAN_MENU_MASK  0x0200u
 
 #ifdef FEATURE_FFT
 #include "fft.h"
@@ -645,6 +649,20 @@ uint8_t input_handle_button(button_id_t button, QueueHandle_t dq)
         {
             const theme_t *th = theme_get();
             uint16_t bg = 0x0010;  /* dark background */
+
+            /* MENU + POWER → clean handoff to the factory IAP bootloader.
+             * The FNIRSI bootloader at 0x08000000 checks the MENU key at
+             * reset; the user is holding it, so a plain reset (NOT the DFU
+             * magic-word path — that was for our retired HID bootloader)
+             * lands in stock upgrade mode. Replaces the old behavior where
+             * POWER alone hit the shutdown countdown and MENU+POWER froze.
+             * The bootloader draws its own "firmware upgrade" screen, so no
+             * delay/message here — reset immediately while MENU is still down. */
+            if (button_scan_get_raw() & BTN_SCAN_MENU_MASK) {
+                __DSB();
+                NVIC_SystemReset();
+                while (1) { }
+            }
 
             /* Draw "Hold to power off" overlay */
             lcd_fill_rect(60, 80, 200, 80, bg);
