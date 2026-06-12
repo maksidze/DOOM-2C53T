@@ -258,3 +258,21 @@ the scope-capable bitstream is uploaded via 0x3B. This confirms on the bench wha
 CLAUDE.md previously only inferred ("NV image services meter but not scope"). The
 trace therefore strictly requires solving the 0x3B config-mode-entry, which is
 walled pending a measurement of our own config wire (soldering, shelved for now).
+
+### Sharpest clue yet: prelude MISO (2026-06-12)
+
+`status` reports our boot-time prelude MISO (init_hs): during our FIRST prelude
+byte `0x05`, the FPGA drives **MISO = 0x80**. Stock's MISO during the same
+`05 00` frame is **0xFF** (high-Z). A Gowin floats MISO when its CONFIG
+controller owns the pins (waiting for config) and DRIVES it when the USER design
+owns them (running). So from the very first prelude byte:
+- Stock: FPGA in config-wait (MISO 0xFF) -> 0x3B lands -> trace.
+- Ours:  FPGA already running its NV user design (MISO 0x80) -> ignores 0x3B.
+
+Our FPGA boots + runs its NV bitstream before we attempt reconfig, and the
+prelude doesn't knock it back into config-wait; stock's stays in config-wait.
+Same silicon + same NV image, so the lever is whatever holds the FPGA in
+config-wait — almost certainly a PROGRAMN/RECONFIG line on an unidentified pin
+(rosenrot00's 2C23T uses PC8; the 2C53T's is unknown; our PB9/PA6/PD6 sweep
+missed it). Finding that pin (decompile hunt for an unexplained GPIO output, or
+a wire capture) is the remaining path. No MCU-side byte/timing fix can substitute.
