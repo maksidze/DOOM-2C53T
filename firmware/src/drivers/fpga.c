@@ -1446,6 +1446,24 @@ uint8_t fpga_spi3_config_sequence(const fpga_cfg_seq_opts_t *opt)
     (void)FPGA_SPI->dt;                  /* Discard any stale RX data */
     fpga.diag_spi_sts = FPGA_SPI->sts;   /* STS before handshake */
 
+    /* Optional FPGA reset pulse (rosenrot00's working 2C23T loader does this;
+     * our 2C53T sequence lacks it). Configure the chosen pin as push-pull
+     * output, drive LOW for reset_low_ms, then HIGH 1ms before the handshake. */
+    if (opt->reset_port >= 1 && opt->reset_port <= 5) {
+        gpio_type *rport = (gpio_type *)((const gpio_type *[]){
+            GPIOA, GPIOB, GPIOC, GPIOD, GPIOE }[opt->reset_port - 1]);
+        uint32_t rmask = (1u << opt->reset_pin);
+        gpio_cfg.gpio_pins = rmask;
+        gpio_cfg.gpio_mode = GPIO_MODE_OUTPUT;
+        gpio_cfg.gpio_out_type = GPIO_OUTPUT_PUSH_PULL;
+        gpio_cfg.gpio_drive_strength = GPIO_DRIVE_STRENGTH_STRONGER;
+        gpio_init(rport, &gpio_cfg);
+        rport->clr = rmask;                 /* RESET LOW */
+        fpga_scope_delay_ms(opt->reset_low_ms ? opt->reset_low_ms : 10);
+        rport->scr = rmask;                 /* RESET HIGH */
+        fpga_scope_delay_ms(1);
+    }
+
     if (opt->arm_pb11) {
         /* PB11 HIGH ~1ms before the CS pulse — stock raises it 1.0ms before
          * the bare CS pulse and holds it HIGH through the upload (capture). */

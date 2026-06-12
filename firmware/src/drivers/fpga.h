@@ -221,6 +221,13 @@ typedef struct {
     uint32_t prelude_gap_ms;  /* gap after each 05/12/15 prelude frame (stock ~100) */
     uint32_t post_close_ms;   /* delay after 0x3A close before scope-config (stock ~600) */
     uint8_t  arm_pb11;        /* 1 = drive PB11 HIGH before the handshake */
+    /* Optional FPGA reset pulse BEFORE the handshake — the step rosenrot00's
+     * working 2C23T loader does (RESET LOW 10ms → HIGH 1ms) that our 2C53T
+     * sequence lacks. The 2C53T reset line is unknown (PC8 is our POWER btn),
+     * so this is sweepable: reset_port 1..5 = A..E, 0 = no pulse. */
+    uint8_t  reset_port;      /* 0=none, 1=A,2=B,3=C,4=D,5=E */
+    uint8_t  reset_pin;       /* 0..15 */
+    uint16_t reset_low_ms;    /* LOW duration (rosenrot uses 10) */
 } fpga_cfg_seq_opts_t;
 
 /* Run the full SPI3 config handshake. Returns the 0x3A close status byte

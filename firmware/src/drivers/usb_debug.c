@@ -1845,6 +1845,7 @@ static void cmd_fpga_reinit(const char *args)
 {
     fpga_cfg_seq_opts_t opt = {
         .upload_br = 0, .prelude_gap_ms = 100, .post_close_ms = 600, .arm_pb11 = 1,
+        .reset_port = 0, .reset_pin = 0, .reset_low_ms = 10,
     };
     char buf[80];
     if (args && *args) {
@@ -1854,13 +1855,23 @@ static void cmd_fpga_reinit(const char *args)
         char *t0 = strtok_r(buf, " \t", &save);
         char *t1 = t0 ? strtok_r(NULL, " \t", &save) : NULL;
         char *t2 = t1 ? strtok_r(NULL, " \t", &save) : NULL;
+        char *t3 = t2 ? strtok_r(NULL, " \t", &save) : NULL;  /* reset pin spec, e.g. b9 */
         if (t0) opt.upload_br      = (uint32_t)strtoul(t0, NULL, 0);
         if (t1) opt.prelude_gap_ms = (uint32_t)strtoul(t1, NULL, 0);
         if (t2) opt.post_close_ms  = (uint32_t)strtoul(t2, NULL, 0);
+        if (t3 && t3[0] >= 'a' && t3[0] <= 'e' && t3[1]) {  /* <port><pin>: a..e + 0..15 */
+            opt.reset_port = (uint8_t)(t3[0] - 'a' + 1);
+            opt.reset_pin  = (uint8_t)strtoul(t3 + 1, NULL, 10);
+        }
     }
 
-    usb_debug_printf("reinit: br=%lu prelude_gap=%lums post_close=%lums\r\n",
-                     opt.upload_br, opt.prelude_gap_ms, opt.post_close_ms);
+    if (opt.reset_port)
+        usb_debug_printf("reinit: br=%lu gap=%lums close=%lums RESET=%c%u(%ums)\r\n",
+                         opt.upload_br, opt.prelude_gap_ms, opt.post_close_ms,
+                         'A' + opt.reset_port - 1, opt.reset_pin, opt.reset_low_ms);
+    else
+        usb_debug_printf("reinit: br=%lu prelude_gap=%lums post_close=%lums (no reset)\r\n",
+                         opt.upload_br, opt.prelude_gap_ms, opt.post_close_ms);
 
     uint8_t close = fpga_spi3_config_sequence(&opt);
 
