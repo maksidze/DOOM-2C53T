@@ -431,6 +431,7 @@ static void cmd_help(void)
         "fpga reinit [br] [gap] [close]   Replay SPI3 config handshake + report\r\n"
         "spi3 acqread                    Read CH1/CH2 via real 0x04/0x05 protocol\r\n"
         "spi3 gowin                      Read+decode Gowin ID/USERCODE/STATUS regs\r\n"
+        "spi3 scopetest [bank]           Full scope seq: USART cfg->PC0->0x04/05 read\r\n"
         "spi3 acqtest                    Decomposer Phase 20 validation test\r\n"
         "spi3 h2verify                   Re-upload H2 + capture FPGA responses\r\n"
         "reboot bootloader               Reboot into USB HID updater\r\n"
@@ -1949,6 +1950,47 @@ static void cmd_spi3_gowin(void)
                  "If slow clock reads it but fast doesn't -> SSPI read path is clock-limited.\r\n");
 }
 
+/* spi3 scopetest [bank] — run the FULL runtime scope-capture sequence the
+ * stock firmware uses, independent of the 0x3B bitstream config:
+ *   1. send the scope-mode USART config (timebase/trigger/channel) — this is
+ *      what switches the FPGA out of meter mode into scope acquisition;
+ *   2. wait for PC0 (data-ready, active LOW) to arm — stock free-runs sampling
+ *      once in scope mode and pulses PC0 low when a frame is ready;
+ *   3. read CH1 (0x04) and CH2 (0x05) with the REAL per-channel protocol.
+ *
+ * This is the decisive test of whether the NV-resident bitstream can do scope
+ * at all. If PC0 arms and the reads show span>0, the bitstream upload was a
+ * detour and we have a trace. If PC0 never arms, config really is required. */
+static void cmd_spi3_scopetest(const char *args)
+{
+    uint8_t bank = 0;
+    if (args && *args) bank = (uint8_t)strtoul(args, NULL, 0);
+
+    usb_send_str("=== scope test: USART scope-cfg -> PC0 wait -> 0x04/0x05 ===\r\n");
+    usb_debug_printf("PB11(active)=%d PC6(spi_en)=%d PC0(rdy)=%d before cfg\r\n",
+                     (GPIOB->idt & (1 << 11)) ? 1 : 0,
+                     (GPIOC->idt & (1 << 6)) ? 1 : 0,
+                     (GPIOC->idt & (1 << 0)) ? 1 : 0);
+
+    usb_debug_printf("Sending scope-mode USART config (bank=%u)...\r\n", bank);
+    fpga_wire_scope_sequence(bank);
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    /* Wait up to 500ms for PC0 to go LOW (data ready). Stock polls it ~1kHz. */
+    int armed = 0, waited = 0;
+    for (waited = 0; waited < 500; waited++) {
+        if (!(GPIOC->idt & (1U << 0))) { armed = 1; break; }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    usb_debug_printf("PC0 data-ready: %s (waited %dms)\r\n",
+                     armed ? "ARMED (went LOW)" : "NEVER (stuck HIGH)", waited);
+
+    usb_send_str("--- CH1 (0x04) / CH2 (0x05) ---\r\n");
+    cmd_spi3_acqread_one(0x04);
+    cmd_spi3_acqread_one(0x05);
+    usb_send_str("(span>0 on either channel = the NV bitstream CAN do scope!)\r\n");
+}
+
 /* fpga reinit [br] [prelude_gap_ms] [post_close_ms] — replay the full SPI3
  * config handshake on demand (prelude → 0x3B bitstream → 0x3A close → scope
  * config) and report the result. Lets us sweep the handshake parameters in
@@ -2167,6 +2209,8 @@ static void dispatch_command(char *line)
         cmd_spi3_acqread();
     } else if (strcmp(line, "spi3 gowin") == 0) {
         cmd_spi3_gowin();
+    } else if (strncmp(line, "spi3 scopetest", 14) == 0) {
+        cmd_spi3_scopetest(line[14] == ' ' ? line + 15 : "");
     } else if (strcmp(line, "spi3 acqtest") == 0) {
         cmd_spi3_acqtest();
     } else if (strcmp(line, "spi3 h2verify") == 0) {

@@ -52,7 +52,8 @@ def main():
         ser.write((c + "\r\n").encode())
         ser.flush()
         # status / h2verify can be long+slow; give them more time
-        long_cmd = any(k in c for k in ("status", "h2verify", "acqtest", "scan", "reinit", "acqread"))
+        long_cmd = any(k in c for k in ("status", "h2verify", "acqtest", "scan",
+                                        "reinit", "acqread", "scopetest", "gowin"))
         resp = drain(ser, settle=2.0 if long_cmd else 0.35,
                      max_wait=20.0 if long_cmd else 4.0)
         print(f"===== $ {c} =====")

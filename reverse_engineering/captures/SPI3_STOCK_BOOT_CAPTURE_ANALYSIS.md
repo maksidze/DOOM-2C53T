@@ -229,3 +229,32 @@ against stock's capture edge-for-edge. Secondary untested idea: stock's USART
 meter traffic (t=2.7–3.6s) PRECEDES the SPI config — a specific USART command
 may tell the NV design to release the fabric for reconfig; worth replaying the
 exact pre-config USART sequence before 0x3B.
+
+### Experiment 6: full runtime scope sequence WITHOUT bitstream (2026-06-12) — CONFIRMS bitstream is required for scope
+
+Discovered three gaps in our RUNTIME scope path (independent of the 0x3B config):
+1. `fpga_wire_scope_sequence` (scope-mode USART config: timebase/trigger/channel)
+   was only ever called from the debug shell — NEVER wired into UI scope-mode entry.
+2. `fpga_acquisition_task` still used the disproven interleaved model
+   (cmd `0x80|range` then `0xFF` reads) instead of per-channel 0x04/0x05.
+3. No PC0 data-ready gating.
+
+Added `spi3 scopetest`: sends the scope-mode USART config, waits for PC0, then
+reads CH1(0x04)/CH2(0x05) with the real protocol — the decisive test of whether
+the NV bitstream can scope on its own.
+
+**Result (Unit 2):**
+- PC0 was already LOW *before* config (`PC0(rdy)=0`) and "armed in 0ms" — so PC0
+  is NOT a meaningful per-frame data-ready here; the NV design just holds it low.
+- 0x04 read → status byte0 `0x80`; 0x05 read → `0x00`. **The bank bit toggles
+  per channel exactly like stock's capture** (stock 0x04 reads alternate 00/80).
+  Our read path now behaves like stock's.
+- BUT byte[2] = `0x00` (stock = `0x01` "buffer valid") and **all samples 0x00,
+  span 0** on both channels. The FPGA has no scope samples to return.
+
+**Conclusion: the NV-resident bitstream is the METER design and cannot sample a
+waveform.** The read interface is correct now, but there is nothing to read until
+the scope-capable bitstream is uploaded via 0x3B. This confirms on the bench what
+CLAUDE.md previously only inferred ("NV image services meter but not scope"). The
+trace therefore strictly requires solving the 0x3B config-mode-entry, which is
+walled pending a measurement of our own config wire (soldering, shelved for now).
