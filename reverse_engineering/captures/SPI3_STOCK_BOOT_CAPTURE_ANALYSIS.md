@@ -276,3 +276,31 @@ config-wait — almost certainly a PROGRAMN/RECONFIG line on an unidentified pin
 (rosenrot00's 2C23T uses PC8; the 2C53T's is unknown; our PB9/PA6/PD6 sweep
 missed it). Finding that pin (decompile hunt for an unexplained GPIO output, or
 a wire capture) is the remaining path. No MCU-side byte/timing fix can substitute.
+
+### RECONFIG-pin hunt — exhausted (2026-06-12)
+
+A full decompile sweep of stock master-init enumerated every GPIO output and
+crossed off all known functions. Three unexplained outputs surfaced:
+- **PC4** — driven conditionally on the FPGA mode flag `DAT_2000010f` (HIGH when
+  mode==2, else LOW); prior analysis (SPI3_INIT_SEQUENCE_DECODED.md Step 11)
+  flagged it as a possible FPGA config-mode strap. Set AFTER the upload, though.
+- **PD3** — static HIGH set during the AFIO/SPI3 bring-up window, never cleared.
+- **PD2** — static HIGH in the probe/coupling region.
+- (PD6 is the only true low→high pulse but it's LCD reset, temporally far.)
+
+**Bench result: all three NEGATIVE.** Tested live via `fpga reinit 0 100 600 <pin>`
+(pulse low 10ms → high before the prelude) for c4, d3, d2 — close still `00`,
+prelude MISO still `0x80`, no samples. None flips the FPGA from user-mode
+(MISO-driven) to config-wait (MISO-float).
+
+**Decisive negative from the hunt:** in the ENTIRE SPI3-init→0x3B-upload window
+(0x08026638–0x08026DA4) the ONLY GPIO output write is PC6 HIGH. Stock pulses NO
+dedicated FPGA reset/reconfig pin. So there is no pin lever to find — stock's
+FPGA enters config-wait by a mechanism invisible to the GPIO trace (its own
+power-on/config timing, or a `.data`-default strap we can't see in the binary).
+
+**No-hardware leads are now genuinely exhausted.** Remaining paths, both needing
+hardware: (1) capture our own SPI3 wire vs stock (fine soldering — shelved);
+(2) load the scope bitstream directly via the FPGA programming header (M0-M3/
+VPP) with an external Gowin programmer / openFPGALoader, bypassing the MCU SSPI
+entirely — then our (now-correct) 0x04/0x05 read path should yield a trace.
