@@ -146,3 +146,45 @@ the prelude + 0x3B upload + 0x3A close + config writes on demand and reports
 close/status, so the handshake can be swept in seconds instead of minutes.
 Then sweep: prelude variants, pre-upload register reads (0x11/0x13/0x41),
 trailing dummy clocks, and CTRL2 DMA-bit on/off.
+
+### Experiment 2+3 results: reset pulse & register reads (NEGATIVE / informative)
+
+Built `fpga reinit [br] [gap] [close] [pin]` for live sweeping. Findings:
+
+- **Reset-pulse sweep** (rosenrot00's 2C23T pulses an FPGA RESET before config):
+  pulsed PB9, PA6, PD6 LOW 10ms → HIGH before the handshake. **No change** —
+  close still 00, buffers empty. (Other pins untested; the 2C53T reset line,
+  if any, is unknown.)
+- **Gowin SSPI register reads** (`spi3 xfer 11/13/41 00 00 00 00 00 00 00`,
+  rosenrot's read framing): all return `80 00 00 00 00 00 00 00` — **no IDCODE
+  on 0x11, no status on 0x41**. The 2C53T stock never issues these reads
+  (capture shows only 05/12/15), so the FPGA may simply not expose them; but it
+  also means we have no positive confirmation the SSPI read path works.
+- **Control pins all correct**: PC6=1 (SPI en), PB11=1 (active), PB6=1 (CS idle
+  high), PC0=0 (armed). Static config matches stock.
+
+**Sharpest clue — MISO during the upload differs from stock:**
+
+| Phase | Stock MISO | Our MISO |
+|---|---|---|
+| 0x3B bitstream upload | **0xFF** (FPGA high-Z, receiving) | **0x00** (FPGA driving low) |
+| idle / 0x03 status read byte0 | 0x00 | **0x80** (stuck bank bit) |
+
+During config-data load a Gowin device should NOT drive MISO — stock's 0xFF
+confirms it's in receive mode. **Our FPGA drives MISO LOW through the whole
+upload**, i.e. it never entered config-receive mode, so our byte-exact 0x3B +
+bitstream is being interpreted as something else and the 0x3A close returns 00.
+The stuck 0x80 bank bit on idle reads (stock toggles 00/80) points the same way:
+the FPGA is in a fixed non-config state.
+
+**Conclusion:** pins ✓, bytes ✓, timing ✓ — the gap is the **config-mode
+entry**. The 05/12/15 prelude is supposed to put the GW1N into SSPI
+SRAM-program mode; on our device it doesn't take. Next leads:
+1. Decode the 05/12/15 prelude MISO responses from the issue-#18 capture at the
+   bit level (the /64 capture has them) — compare to ours byte-for-byte.
+2. Look up the GW1N-2 SSPI config command sequence (Gowin UG290 / SUG100):
+   confirm whether 0x05/0x12/0x15 is the full "enable + erase + program" enter
+   sequence or whether a command (e.g. config-enable 0x15 BEFORE erase, or a
+   specific order/dummy-clock count) is missing/misordered on our side.
+3. Ask rosenrot00 how the GW1N enters SRAM-program mode without a reset on a
+   NV-booted design (their 2C23T pulses reset; the 2C53T apparently doesn't).
