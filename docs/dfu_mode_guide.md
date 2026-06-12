@@ -133,6 +133,38 @@ Separate from the ROM DFU path above: the device's **stock bootloader** also acc
 
 A bad flash is never a brick — re-enter upgrade mode and reflash any image.
 
+### Full factory restore (recover MENU+Power upgrade mode)
+
+The stock device has **three** firmware layers, and which ones you have determines whether the MENU+Power upgrade disk works:
+
+| Address | Layer | Notes |
+|---------|-------|-------|
+| (MCU silicon) | ROM DFU bootloader | Mask ROM, unerasable — BOOT0 + reset always reaches it |
+| `0x08000000` | **Factory IAP bootloader** (28 KB) | Implements the MENU+Power `IAP` upgrade disk. **Not part of any `.bin` you can download** — it only ships pre-installed |
+| `0x08007000` | Stock application | The `APP_2C53T_V*.bin` you can download from FNIRSI |
+
+If you flashed an alternative bootloader (e.g. an older OpenScope HID bootloader, or a community switcher branch) directly to `0x08000000`, you **overwrote the factory IAP bootloader** and MENU+Power no longer mounts the `IAP` disk. Flashing the stock app to both `0x08000000` and `0x08007000` will boot, but it does **not** restore the upgrade disk — those are app fragments, not the IAP bootloader.
+
+To fully restore factory state you need the factory IAP bootloader image. We've archived a dump from a V1.4 unit at [`archive/factory_iap_bootloader_2C53T.bin`](../archive/factory_iap_bootloader_2C53T.bin) (28,672 bytes, sha256 `0c9ec7d6…`). Restore over ROM DFU (open case, BOOT0 + pinhole reset — see top of this guide):
+
+```bash
+# Verify ROM DFU enumerated (2e3c:df11, alt 0 = Internal Flash)
+dfu-util -l
+
+# 1. Factory IAP bootloader → 0x08000000 (restores MENU+Power upgrade disk)
+dfu-util -a 0 -d 2e3c:df11 -s 0x08000000 -D archive/factory_iap_bootloader_2C53T.bin
+
+# 2. Stock application → 0x08007000
+dfu-util -a 0 -d 2e3c:df11 -s 0x08007000 \
+  -D "archive/2C53T Firmware V1.2.0/APP_2C53T_V1.2.0_251015.bin"
+
+# Remove BOOT0 jumper, pinhole reset → boots bone-stock; MENU+Power mounts IAP again.
+```
+
+This was tested end-to-end on a unit whose factory bootloader had been erased months earlier: it boots stock V1.2.0, shows a live trace, and MENU+Power restores the `IAP` upgrade disk. If the device drops off DFU mid-write, **hold the POWER button during the flash** (PC9 isn't asserted in ROM DFU on some units) and retry.
+
+> The factory IAP bootloader is FNIRSI's proprietary code, archived here solely for device recovery. If FNIRSI requests removal, we'll comply.
+
 ### Windows: Artery ISP Programmer (community-contributed)
 
 Artery ships a Windows GUI flasher that speaks the same ROM DFU protocol as `dfu-util`. A user on Windows 11 reported (see [#4](https://github.com/DavidClawson/OpenScope-2C53T/issues/4)) that after fighting WinUSB/`dfu-util` setup they flashed successfully using Artery's tool instead.
