@@ -78,18 +78,22 @@
 #define configMAX_SYSCALL_INTERRUPT_PRIORITY    (5 << (8 - configPRIO_BITS))
 #define configMAX_API_CALL_INTERRUPT_PRIORITY   configMAX_SYSCALL_INTERRUPT_PRIORITY
 
-/* FreeRTOS interrupt handler names for Cortex-M */
+/* FreeRTOS interrupt handler names for Cortex-M.
+ * We use direct #define aliasing (SVC_Handler = vPortSVCHandler etc.)
+ * so the vector table symbols ARE the FreeRTOS handlers. Disable the
+ * handler-installation check since the pointer comparison in port.c will
+ * fail when VTOR is remapped (GUEST_BUILD at 0x08007000). */
+#define configCHECK_HANDLER_INSTALLATION    0
 #define vPortSVCHandler     SVC_Handler
 #define xPortPendSVHandler  PendSV_Handler
 #define xPortSysTickHandler SysTick_Handler
 
-/* Assert — catches FreeRTOS API misuse during development.
- * Routes through fault_display() so the user sees what happened
- * before the watchdog resets the MCU (~3 seconds). */
+/* Assert — shows file:line so you can identify which assert fires. */
 extern void fault_display(const char *title, const char *detail);
+extern void fault_display_line(const char *file, int line);
 #define configASSERT(x) if((x) == 0) { \
     taskDISABLE_INTERRUPTS(); \
-    fault_display("ASSERT FAIL", "FreeRTOS API misuse"); \
+    fault_display_line(__FILE__, __LINE__); \
     for(;;); \
 }
 

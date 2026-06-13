@@ -13,6 +13,18 @@ typedef enum {
     FLASH_FS_ERR_RENAME,
 } flash_fs_error_t;
 
+#define FLASH_FS_VOLUME_COUNT 2u
+
+typedef struct {
+    uint32_t base_address;
+    uint32_t size_bytes;
+    uint16_t bytes_per_sector;
+    uint16_t total_sectors;
+    uint16_t root_entries;
+    uint8_t  sectors_per_cluster;
+    bool     mounted;
+} flash_fs_volume_info_t;
+
 /* Initialize filesystem with mutex protection. Call once from main(). */
 flash_fs_error_t flash_fs_init(void);
 
@@ -28,6 +40,11 @@ flash_fs_error_t flash_fs_delete(const char *path);
 /* Check if filesystem is initialized */
 bool flash_fs_is_ready(void);
 
+/* Read-only FAT12 probe results. No program or erase commands are issued. */
+bool flash_fs_get_jedec(uint8_t *manufacturer, uint8_t *memory_type,
+                        uint8_t *capacity);
+const flash_fs_volume_info_t *flash_fs_volume(uint32_t index);
+
 /* ═══════════════════════════════════════════════════════════════════
  * Raw SPI flash access
  *
@@ -42,6 +59,16 @@ flash_fs_error_t flash_fs_raw_read_jedec(uint8_t *manufacturer,
                                          uint8_t *memory_type,
                                          uint8_t *capacity);
 flash_fs_error_t flash_fs_raw_read_bytes(uint32_t addr, void *buf, uint32_t len);
+/* IRQ-safe variant used by USB MSC after initialization. The caller must
+ * guarantee exclusive SPI2 ownership. */
+flash_fs_error_t flash_fs_raw_read_bytes_direct(uint32_t addr, void *buf,
+                                                 uint32_t len);
+
+/* Writable access is deliberately limited to FAT1 (0x200000-0xFFFFFF).
+ * Offset is relative to the FAT1 boot sector. Intended for USB MSC only. */
+flash_fs_error_t flash_fs_fat1_write_bytes_direct(uint32_t offset,
+                                                   const void *buf,
+                                                   uint32_t len);
 
 /* ═══════════════════════════════════════════════════════════════════
  * Factory calibration

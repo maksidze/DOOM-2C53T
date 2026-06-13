@@ -21,8 +21,25 @@
 #include "at32f403a_407.h"
 #include "FreeRTOS.h"
 #include "queue.h"
-#include "ui.h"  /* for button_id_t */
-
+/* Button IDs */
+typedef enum {
+    BTN_NONE = 0,
+    BTN_CH1,
+    BTN_CH2,
+    BTN_MOVE,
+    BTN_SELECT,
+    BTN_TRIGGER,
+    BTN_PRM,
+    BTN_AUTO,
+    BTN_SAVE,
+    BTN_MENU,
+    BTN_UP,
+    BTN_DOWN,
+    BTN_LEFT,
+    BTN_RIGHT,
+    BTN_OK,
+    BTN_POWER,
+} button_id_t;
 /*
  * Initialize TMR3 at 500Hz and configure GPIO for matrix scanning.
  * Confirmed button presses are sent as button_id_t values to the

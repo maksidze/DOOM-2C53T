@@ -15,6 +15,12 @@
 /* Maximum endpoint count */
 #define USB_EPT_MAX_NUM                   8
 
+/* The AT32 MSC class does not assign custom PMA addresses for its bulk
+ * endpoints. Let the USB core allocate EP0 and EP1 buffers, as done by the
+ * vendor MSC example. Without this, both EP1 directions remain at address 0
+ * and corrupt the buffer descriptor table/received CBW. */
+#define USB_EPT_AUTO_MALLOC_BUFFER
+
 /* Endpoint buffer addresses in USB packet memory (512 bytes total).
  * Each endpoint needs TX and RX buffer space. Layout:
  *   0x00-0x3F  reserved (packet memory table)

@@ -1,96 +1,189 @@
 /*
- * OpenScope 2C53T - Custom Firmware
+ * OpenScope 2C53T - DOOM Port Minimal Base
  *
  * Target: Artery AT32F403A (ARM Cortex-M4F @ 240MHz)
  * Display: ST7789V 320x240 via EXMC/XMC
  * RTOS: FreeRTOS
  *
- * This firmware initializes the LCD, draws a scope-like UI,
- * and responds to button inputs for mode selection.
+ * This minimal firmware initializes the hardware and FreeRTOS,
+ * and provides a clean canvas for porting DOOM.
  */
 
 #include "at32f403a_407.h"
 
-/* AT32 clock config (from at32f403a_gcc/user/) */
+/* AT32 clock config */
 extern void system_clock_config(void);
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
-#include "timers.h"
 
-/* Include our drivers and UI */
+/* Core drivers */
 #include "lcd.h"
-#include "ui.h"
-#include "signal_gen.h"
-#include "watchdog.h"
-#include "scope_state.h"
-#include "input_handler.h"
-#include "theme.h"
-#include "math_channel.h"
-#include "component_test.h"
-#include "persistence.h"
 #include "button_scan.h"
-#include "dfu_boot.h"
-#include "battery.h"
-#include "fpga.h"
-#include "meter_data.h"
+#include "dac_output.h"
 #include "flash_fs.h"
-#include "usb_debug.h"
+#include "battery.h"
+#include "dfu_boot.h"
+#include "watchdog.h"
+#include "usb_msc.h"
+#include "font.h"
+#include "w_wad.h"
+#include <stdio.h>
+#include <stdbool.h>
+#include <string.h>
 
-/* ═══════════════════════════════════════════════════════════════════
- * Global State (extern'd via ui.h for UI modules)
- * ═══════════════════════════════════════════════════════════════════ */
+bool g_skip_doom = false;
+static bool g_wad_found;
+static uint32_t g_iwad_addr;
+static uint32_t g_iwad_size;
+static uint16_t g_eopb0;
+static uint32_t g_wad_fat_offset;
+static uint32_t g_wad_data_offset;
+static uint32_t g_wad_cluster_size;
+static uint16_t g_wad_first_cluster;
 
-volatile device_mode_t current_mode = MODE_OSCILLOSCOPE;
-volatile uint32_t      uptime_seconds = 0;
-volatile int8_t        settings_selected = 0;
-volatile int8_t        settings_depth = 0;
-volatile int8_t        settings_sub_selected = 0;
-volatile uint8_t       active_channel = 0;  /* 0=CH1, 1=CH2 */
-volatile uint8_t       meter_submode = 0;   /* 0-9: current meter sub-mode */
-volatile uint8_t       meter_layout = 0;   /* 0=full, 1=chart, 2=stats */
-volatile bool          meter_rel_enabled = false;  /* Relative/delta mode */
-volatile float         meter_rel_reference = 0.0f;
-volatile bool          meter_hold_enabled = false;  /* Auto-hold mode */
-volatile bool          meter_hold_locked = false;   /* Hold has captured */
-volatile float         meter_hold_value = 0.0f;
+typedef struct {
+    uint8_t name[11];
+    uint8_t attributes;
+    uint8_t reserved[14];
+    uint16_t first_cluster;
+    uint32_t size;
+} fat_dir_entry_t;
 
-/* Fuse tester state */
-volatile uint8_t       fuse_type = 0;               /* FUSE_TYPE_ATO_ATC */
-volatile uint8_t       fuse_rating_idx = 4;          /* Default to 10A (index 4 in ATO table) */
-volatile uint8_t       fuse_view = 0;                /* FUSE_VIEW_DETAIL */
-volatile float         fuse_scan_threshold_mv = 0.5f; /* Pass/fail threshold */
+static uint16_t read_le16(const uint8_t *data)
+{
+    return (uint16_t)data[0] | ((uint16_t)data[1] << 8);
+}
 
-/* Scope feature toggles */
-volatile bool          math_enabled = false;
-volatile uint8_t       math_op = 0;        /* MATH_ADD */
-volatile bool          persist_enabled = false;
+static bool find_doom_wad(uint32_t *flash_address, uint32_t *file_size)
+{
+    static const uint8_t doom_name[11] = {
+        'D', 'O', 'O', 'M', '1', ' ', ' ', ' ', 'W', 'A', 'D'
+    };
+    const uint32_t volume_base = 0x00200000U;
+    uint8_t boot[512];
 
-#ifdef FEATURE_FFT
-volatile scope_view_t scope_view = SCOPE_VIEW_TIME;
-fft_result_t fft_result;
-#endif
+    if (flash_fs_raw_read_bytes_direct(volume_base, boot, sizeof(boot)) != FLASH_FS_OK ||
+        boot[510] != 0x55 || boot[511] != 0xAA) {
+        return false;
+    }
+
+    uint16_t bytes_per_sector = read_le16(&boot[11]);
+    uint8_t sectors_per_cluster = boot[13];
+    uint16_t reserved_sectors = read_le16(&boot[14]);
+    uint8_t fat_count = boot[16];
+    uint16_t root_entries = read_le16(&boot[17]);
+    uint16_t sectors_per_fat = read_le16(&boot[22]);
+    if (bytes_per_sector == 0 || sectors_per_cluster == 0 ||
+        fat_count == 0 || root_entries == 0 || sectors_per_fat == 0) {
+        return false;
+    }
+
+    uint32_t root_start_sector = reserved_sectors +
+                                 (uint32_t)fat_count * sectors_per_fat;
+    uint32_t root_sectors = ((uint32_t)root_entries * 32U +
+                             bytes_per_sector - 1U) / bytes_per_sector;
+    uint32_t data_start_sector = root_start_sector + root_sectors;
+
+    for (uint32_t i = 0; i < root_entries; i++) {
+        fat_dir_entry_t entry;
+        uint32_t address = volume_base + root_start_sector * bytes_per_sector +
+                           i * sizeof(entry);
+        if (flash_fs_raw_read_bytes_direct(address, &entry, sizeof(entry)) != FLASH_FS_OK) {
+            return false;
+        }
+        if (entry.name[0] == 0x00) {
+            break;
+        }
+        if (entry.name[0] == 0xE5 || entry.attributes == 0x0F ||
+            (entry.attributes & 0x18) != 0) {
+            continue;
+        }
+        if (memcmp(entry.name, doom_name, sizeof(doom_name)) == 0 &&
+            entry.first_cluster >= 2 && entry.size >= 12) {
+            uint32_t first_sector = data_start_sector +
+                                    (uint32_t)(entry.first_cluster - 2) *
+                                    sectors_per_cluster;
+            uint32_t wad_address = volume_base + first_sector * bytes_per_sector;
+            char magic[4];
+            if (flash_fs_raw_read_bytes_direct(wad_address, magic, sizeof(magic)) == FLASH_FS_OK &&
+                ((memcmp(magic, "IWAD", 4) == 0) ||
+                 (memcmp(magic, "PWAD", 4) == 0))) {
+                *flash_address = wad_address;
+                *file_size = entry.size;
+                g_wad_fat_offset = (uint32_t)reserved_sectors * bytes_per_sector;
+                g_wad_data_offset = data_start_sector * bytes_per_sector;
+                g_wad_cluster_size = (uint32_t)sectors_per_cluster * bytes_per_sector;
+                g_wad_first_cluster = entry.first_cluster;
+                return true;
+            }
+        }
+        if ((i & 0x1F) == 0) {
+            watchdog_feed();
+        }
+    }
+    return false;
+}
+
+static void show_wad_not_found(void)
+{
+    lcd_clear(COLOR_BLACK);
+    lcd_draw_string(28, 64, "DOOM1.WAD NOT FOUND", COLOR_RED, COLOR_BLACK);
+    lcd_draw_string(28, 104, "File is missing from disk", COLOR_WHITE, COLOR_BLACK);
+    lcd_draw_string(28, 136, "Restart after adding the file", COLOR_WHITE, COLOR_BLACK);
+    for (;;) {
+        watchdog_feed();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+static void show_sram_mode_error(void)
+{
+    char value[32];
+    snprintf(value, sizeof(value), "EOPB0 = 0x%02X", g_eopb0 & 0xFFU);
+    lcd_clear(COLOR_BLACK);
+    lcd_draw_string(24, 56, "224KB SRAM REQUIRED", COLOR_RED, COLOR_BLACK);
+    lcd_draw_string(24, 96, value, COLOR_YELLOW, COLOR_BLACK);
+    lcd_draw_string(24, 132, "Required value: 0xFE", COLOR_WHITE, COLOR_BLACK);
+    for (;;) {
+        watchdog_feed();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+static void show_flash_diag(void)
+{
+    char line1[48];
+    char line2[64];
+    snprintf(line1, sizeof(line1), "P:%lu A:%08lX",
+             doom_flash_diag.phase, doom_flash_diag.address);
+    snprintf(line2, sizeof(line2), "W:%08lX S:%08lX C:%08lX",
+             doom_flash_diag.word, doom_flash_diag.status,
+             doom_flash_diag.control);
+    lcd_clear(COLOR_BLACK);
+    lcd_draw_string(16, 38, "FLASH DIAG", COLOR_RED, COLOR_BLACK);
+    lcd_draw_string(16, 78, line1, COLOR_YELLOW, COLOR_BLACK);
+    lcd_draw_string(16, 112, line2, COLOR_WHITE, COLOR_BLACK);
+    for (;;) {
+        watchdog_feed();
+        delay_ms(50);
+    }
+}
 
 /* FreeRTOS handles */
 static TaskHandle_t  xDisplayTaskHandle = NULL;
 static TaskHandle_t  xInputTaskHandle   = NULL;
-static QueueHandle_t xDisplayQueue      = NULL;
 static QueueHandle_t xInputQueue        = NULL;
 
-/* Health monitor slots (assigned in main, used in task loops) */
-static int health_slot_display = -1;
-static int health_slot_input   = -1;
-
 /* ═══════════════════════════════════════════════════════════════════
- * Simple delay (used before RTOS starts)
+ * Simple delay
  * ═══════════════════════════════════════════════════════════════════ */
 
-/* delay_ms is declared extern in lcd.h — provide the implementation here */
 void delay_ms(uint32_t ms)
 {
     volatile uint32_t count;
     while (ms--) {
-        count = system_core_clock / 10000;  /* Clock-speed independent */
+        count = system_core_clock / 10000;
         while (count--) {
             __asm volatile("nop");
         }
@@ -102,245 +195,139 @@ void delay_ms(uint32_t ms)
  * ═══════════════════════════════════════════════════════════════════ */
 
 /*
- * Display Task (Priority 1 — lowest, matches original firmware)
+ * Display / Main Task
  *
- * Receives display commands via queue and renders the appropriate screen.
- * This is the only task that writes to the LCD.
+ * Currently a stub that clears the screen and draws test text.
+ * The DOOM game loop can eventually run here.
  */
+extern void D_DoomMain(void);
+
+#include "doom_iwad.h"
+extern void I_Error(const char *error, ...);
+
 static void vDisplayTask(void *pvParameters)
 {
     (void)pvParameters;
-    uint8_t cmd;
-    uint32_t frame = 0;
 
-    /* Show splash screen for 2 seconds */
-    draw_splash();
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    /* Feed watchdog immediately — we're alive */
+    watchdog_feed();
 
-    /* Initial draw */
+#ifndef EMULATOR_BUILD
+    if ((g_eopb0 & 0xFFU) != 0xFEU) {
+        show_sram_mode_error();
+    }
+#endif
+
+    if (g_skip_doom) {
+        lcd_clear(COLOR_BLUE);
+        lcd_draw_string(16, 24, "USB-MODE", COLOR_WHITE, COLOR_BLUE);
+        lcd_draw_string(16, 64, "DOOM startup skipped", COLOR_YELLOW, COLOR_BLUE);
+        lcd_draw_string(16, 96, "USB STORAGE ACTIVE", COLOR_WHITE, COLOR_BLUE);
+        lcd_draw_string(16, 136, "Connect USB-C to update WAD", COLOR_WHITE, COLOR_BLUE);
+        for (;;) {
+            watchdog_feed();
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+
     lcd_clear(COLOR_BLACK);
-    draw_status_bar();
-    draw_info_bar();
-    draw_scope_screen(0);
+    watchdog_feed();  /* lcd_clear can be slow, feed again */
 
+    font_draw_string(12, 12, "LOOKING FOR DOOM1.WAD...", COLOR_WHITE, COLOR_BLACK, &font_medium);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    if (!g_wad_found) {
+        show_wad_not_found();
+    }
+
+    /* Keep DOOM's virtual WAD pointers and map them to this SPI offset. */
+    doom_iwad_configure_fat12(0x00200000U, g_wad_fat_offset,
+                              g_wad_data_offset, g_wad_cluster_size,
+                              g_wad_first_cluster, g_iwad_size);
+    if (!doom_iwad_validate()) {
+        I_Error("DOOM1.WAD invalid or PLAYPAL missing");
+    }
+
+    font_draw_string(12, 40, "BOOTING DOOM...", COLOR_WHITE, COLOR_BLACK, &font_medium);
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // Call into the DOOM engine
+    D_DoomMain();
+
+    // Should never reach here
     for (;;) {
-        /* Check for commands (non-blocking with short timeout for animation) */
-        if (xQueueReceive(xDisplayQueue, &cmd, pdMS_TO_TICKS(50)) == pdTRUE) {
-            switch (cmd) {
-            case DCMD_DRAW_SPLASH:
-                draw_splash();
-                break;
-            case DCMD_REDRAW_ALL:
-                lcd_clear(COLOR_BLACK);
-                status_bar_invalidate();
-                draw_status_bar();
-                draw_info_bar();
-                /* Draw current mode's screen */
-                if (current_mode == MODE_OSCILLOSCOPE) {
-#ifdef FEATURE_FFT
-                    if (scope_view == SCOPE_VIEW_FFT)
-                        draw_fft_screen();
-                    else if (scope_view == SCOPE_VIEW_SPLIT)
-                        draw_split_screen(frame);
-                    else if (scope_view == SCOPE_VIEW_WATERFALL)
-                        draw_waterfall_screen();
-                    else
-#endif
-                        draw_scope_screen(frame);
-                } else if (current_mode == MODE_MULTIMETER) {
-                    draw_meter_screen();
-                } else if (current_mode == MODE_SIGNAL_GEN) {
-                    draw_siggen_screen(frame);
-                } else if (current_mode == MODE_SETTINGS) {
-                    draw_settings_screen();
-                }
-                break;
-            case DCMD_DRAW_SCOPE:
-                if (current_mode == MODE_OSCILLOSCOPE) {
-#ifdef FEATURE_FFT
-                    if (scope_view == SCOPE_VIEW_FFT)
-                        draw_fft_screen();
-                    else if (scope_view == SCOPE_VIEW_SPLIT)
-                        draw_split_screen(frame);
-                    else if (scope_view == SCOPE_VIEW_WATERFALL)
-                        draw_waterfall_screen();
-                    else
-#endif
-                        draw_scope_screen(frame);
-                }
-                break;
-            case DCMD_DRAW_METER:
-                if (current_mode == MODE_MULTIMETER) draw_meter_screen();
-                break;
-            case DCMD_DRAW_SIGGEN:
-                if (current_mode == MODE_SIGNAL_GEN) draw_siggen_screen(frame);
-                break;
-            case DCMD_DRAW_SETTINGS:
-                if (current_mode == MODE_SETTINGS) draw_settings_screen();
-                break;
-            case DCMD_DRAW_STATUS_BAR:
-                draw_status_bar();
-                break;
-#ifdef FEATURE_FFT
-            case DCMD_DRAW_FFT:
-                if (current_mode == MODE_OSCILLOSCOPE)
-                    draw_fft_screen();
-                break;
-#endif
-            default:
-                break;
-            }
-        }
-
-        /* Check in with health monitor */
-        health_checkin(health_slot_display);
-
-        /* Track mode transitions for SPI3 acquisition warmup */
-        static device_mode_t last_rendered_mode = (device_mode_t)0xFF;
-        static uint32_t scope_entered_frame = 0;
-        if (current_mode != last_rendered_mode) {
-            if (current_mode == MODE_OSCILLOSCOPE)
-                scope_entered_frame = frame;
-            last_rendered_mode = current_mode;
-        }
-
-#ifndef EMULATOR_BUILD
-        if (fpga_service_requests()) {
-            scope_entered_frame = frame;
-        }
-#endif
-
-        /* Periodic redraws for active modes.
-         *
-         * All modes receive explicit redraws via queue commands above
-         * (DCMD_DRAW_SCOPE, DCMD_DRAW_SIGGEN, etc.) when button presses
-         * or data events require it. The code below only handles cases
-         * that need continuous or periodic updates beyond those events.
-         *
-         * Before the meter fix (2026-04-04), scope and siggen both
-         * redrew unconditionally every 50ms tick, causing visible
-         * flicker from the full-area lcd_fill_rect + repaint sequence.
-         * Now all three data modes are gated the same way. */
-        if (current_mode == MODE_OSCILLOSCOPE) {
-            const scope_state_t *ss_anim = scope_state_get();
-            if (ss_anim->running) {
-                /* ── Scope heartbeat / acquisition re-arm ───────────
-                 * Keep the existing warmup and cadence for now, but use the
-                 * stock-like cmd-3 path instead of a bare SPI trigger. That
-                 * re-applies timebase state before each queued read, matching
-                 * the live shell experiments more closely. */
-#ifndef EMULATOR_BUILD
-                if ((frame - scope_entered_frame) >= 10 /* 500ms warmup */
-                    && (frame % 7) == 0
-                    && fpga.initialized) {
-                    fpga_scope_heartbeat();
-                }
-#endif
-
-                /* Redraw when: popup counting down, new SPI3 data arrived,
-                 * or ~1s safety tick for time-based UI elements. */
-                static uint32_t last_scope_frame = 0;
-                static uint16_t last_spi3_ok = 0;
-                bool new_data = (fpga.spi3_ok_count != last_spi3_ok);
-                if (new_data) last_spi3_ok = fpga.spi3_ok_count;
-
-                if (scope_popup_active() || new_data
-                    || (frame - last_scope_frame) >= 20) {
-#ifdef FEATURE_FFT
-                    if (scope_view == SCOPE_VIEW_FFT)
-                        draw_fft_screen();
-                    else if (scope_view == SCOPE_VIEW_SPLIT)
-                        draw_split_screen(frame);
-                    else if (scope_view == SCOPE_VIEW_WATERFALL)
-                        draw_waterfall_screen();
-                    else
-#endif
-                        draw_scope_screen(frame);
-                    last_scope_frame = frame;
-                }
-            }
-        } else if (current_mode == MODE_SIGNAL_GEN) {
-            /* Siggen UI is static — redraws only on parameter changes
-             * via DCMD_DRAW_SIGGEN queue commands from input_handler.
-             * No continuous animation needed. */
-        } else if (current_mode == MODE_MULTIMETER) {
-            /* Only redraw the meter when new FPGA data has arrived, or
-             * every second as a safety tick for time-based UI elements
-             * (HOLD indicator animations, REL clock, etc.). The display
-             * loop runs at 20 Hz but the FPGA meter poll task only
-             * produces data at ~4 Hz — drawing every loop iteration
-             * caused visible flicker from the content-area clear +
-             * redraw sequence. Settings doesn't flicker because it has
-             * no unconditional redraw branch; meter now matches that
-             * pattern, gated on the meter_reading.update_count field. */
-            static uint32_t last_meter_update = 0xFFFFFFFFu;
-            static uint32_t last_meter_frame  = 0;
-            uint32_t uc = meter_reading.update_count;
-            if (uc != last_meter_update || (frame - last_meter_frame) >= 20) {
-                draw_meter_screen();
-                last_meter_update = uc;
-                last_meter_frame  = frame;
-            }
-        }
-
-        frame++;
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
 /*
- * Input Task (Priority 4 — highest user task, matches original firmware)
+ * Input Task
  *
- * Receives hardware-debounced button presses from the TMR3 matrix scan
- * driver (button_scan.c), then delegates to input_handle_button() for
- * all action logic.
- *
- * The old GPIO polling code was replaced after hardware testing confirmed
- * the buttons use a bidirectional 4x3 matrix requiring active scanning.
- * See: reverse_engineering/analysis_v120/button_map_confirmed.md
+ * button_scan_init() is called HERE, after the scheduler starts, so the
+ * TMR3 ISR never fires before xQueueSendFromISR() is safe to call.
+ * Calling button_scan_init() in main() before vTaskStartScheduler() would
+ * immediately trigger configASSERT because the scheduler is suspended.
  */
 static void vInputTask(void *pvParameters)
 {
     (void)pvParameters;
 
-    for (;;) {
-        button_id_t pressed;
+    /* Start button scanner now that scheduler is running */
+    button_scan_init(xInputQueue);
 
-        /* Block until TMR3 ISR confirms a debounced button press */
+    button_id_t pressed;
+    TickType_t power_press_time = 0;
+    bool power_hold_active = false;
+
+    const uint16_t power_mask = 0x0001U;
+    const uint16_t menu_mask = 0x0200U;
+
+    for (;;) {
+        /* Block until a button event arrives */
         if (xQueueReceive(xInputQueue, &pressed, pdMS_TO_TICKS(100)) == pdTRUE) {
-            input_handle_button(pressed, xDisplayQueue);
+            if (pressed == BTN_POWER) {
+                power_press_time = xTaskGetTickCount();
+                power_hold_active = true;
+            }
         }
 
-        /* Check in with health monitor */
-        health_checkin(health_slot_input);
+        /* Check if USB was plugged in during runtime */
+        battery_update();
+        if (battery_is_charging()) {
+            NVIC_SystemReset();
+        }
+
+        /* MENU + POWER enters the updater; POWER alone shuts down. */
+        uint16_t raw_btns = button_scan_get_raw();
+        if (power_hold_active && (raw_btns & power_mask)) {
+            if (raw_btns & menu_mask) {
+                dfu_request_reboot();
+            }
+
+            if ((xTaskGetTickCount() - power_press_time) >= pdMS_TO_TICKS(3000)) {
+                /* Stop DOOM from repainting over the shutdown message. */
+                vTaskSuspend(xDisplayTaskHandle);
+                watchdog_feed();
+                lcd_clear(COLOR_BLACK);
+                font_draw_string(82, 106, "POWERING OFF", COLOR_WHITE,
+                                 COLOR_BLACK, &font_medium);
+                vTaskDelay(pdMS_TO_TICKS(250));
+
+                /* PC9 is the external power latch: LOW removes power. */
+                GPIOC->clr = (1U << 9);
+
+                /* Keep the watchdog quiet if external power drops slowly. */
+                for (;;) {
+                    watchdog_feed();
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                }
+            }
+        } else {
+            power_hold_active = false;
+        }
     }
 }
 
-/*
- * Timer callback — runs every 1 second
- */
-static void vOneSecondTimerCallback(TimerHandle_t xTimer)
-{
-    (void)xTimer;
-    uptime_seconds++;
-    battery_update();
-    uint8_t cmd = DCMD_DRAW_STATUS_BAR;
-    /* Zero timeout is intentional: timer service task is highest priority,
-     * so blocking here would stall all timers including the health check.
-     * A dropped status bar update is harmless — the next one catches up. */
-    xQueueSend(xDisplayQueue, &cmd, 0);
-}
-
-/*
- * Health check timer — runs every 500ms
- *
- * Checks all registered tasks for liveness and stack health.
- * Only feeds the watchdog if everything is OK.
- */
-static void vHealthCheckCallback(TimerHandle_t xTimer)
-{
-    (void)xTimer;
-    health_check();
-}
 
 /* ═══════════════════════════════════════════════════════════════════
  * Main
@@ -354,41 +341,61 @@ int main(void)
     *(volatile uint32_t *)0x40021018 = 0x0000FFFD;
     *(volatile uint32_t *)0x4002101C = 0x3FFFFFFF;
 #else
+    /* Reset_Handler already installed this image's MSP. Never change MSP from
+     * inside main(): doing so invalidates the current C stack frame. */
+    __disable_irq();
+
+    /* Make data bus faults precise while diagnosing guest SRAM writes.
+     * Without this, Cortex-M4 reports IMPRECISERR after the failing store and
+     * BFAR contains no valid address. */
+    SCnSCB->ACTLR |= (1UL << 1); /* DISDEFWBUF */
+    __DSB();
+    __ISB();
+
     /* Power hold — PC9 HIGH to keep device on (MUST be first!) */
     crm_periph_clock_enable(CRM_GPIOC_PERIPH_CLOCK, TRUE);
     GPIOC->cfghr = (GPIOC->cfghr & ~(0xF << 4)) | (0x3 << 4); /* PC9 push-pull 50MHz */
     GPIOC->scr = (1 << 9);  /* PC9 HIGH */
 
-    /* Set VTOR. Normal build runs at 0x08004000 under our HID bootloader;
-     * GUEST_BUILD runs at 0x08007000 under the FNIRSI stock bootloader (unit #2). */
+    /* Set VTOR to our vector table.
+     * GUEST_BUILD: app linked at 0x08007000 (runs under stock FNIRSI bootloader)
+     * Normal build: app linked at 0x08004000 (runs under our HID bootloader)
+     * Wrong VTOR → SVC/PendSV jump into wrong table → instant HardFault */
 #ifdef GUEST_BUILD
-    SCB->VTOR = FLASH_BASE | 0x7000;
+    SCB->VTOR = FLASH_BASE | 0x7000;  /* 0x08007000 — guest base */
 #else
-    SCB->VTOR = FLASH_BASE | 0x4000;
+    SCB->VTOR = FLASH_BASE | 0x4000;  /* 0x08004000 — HID bootloader app */
 #endif
 
-    /* Check if previous run requested DFU reboot (magic word in RAM).
-     * RAM persists across soft reset, so the magic word survives. */
+    /* IMPORTANT: The Chinese stock bootloader jumps to the guest app without
+     * disabling its peripherals or interrupts (e.g., USB, TMR3, USART2).
+     * We MUST disable all interrupts in the NVIC and clear any pending
+     * interrupts before they fire and jump to our uninitialized handlers. */
+    
+    __DSB();
+    __ISB();
+    SysTick->CTRL = 0;
+    SysTick->LOAD = 0;
+    SysTick->VAL = 0;
+    SCB->ICSR = SCB_ICSR_PENDSTCLR_Msk | SCB_ICSR_PENDSVCLR_Msk;
+
+    NVIC->ICER[0] = 0xFFFFFFFF;
+    NVIC->ICER[1] = 0xFFFFFFFF;
+    NVIC->ICER[2] = 0xFFFFFFFF;
+    NVIC->ICPR[0] = 0xFFFFFFFF;
+    NVIC->ICPR[1] = 0xFFFFFFFF;
+    NVIC->ICPR[2] = 0xFFFFFFFF;
+
+
+    /* Check DFU */
     dfu_check_magic();
 
-    /* NOTE: Boot button DFU check (dfu_check_boot_button) is disabled for now.
-     * PC8 (POWER) reads LOW during power-on since it's the same button that
-     * turns the device on, causing false DFU entry. Need a different trigger
-     * (e.g., MENU + POWER combo, or long-hold detection with LCD feedback).
-     * For now, use Settings > Firmware Update for software DFU entry. */
-
-    /* NOTE: EOPB0 must be set to 0xFE (224KB SRAM) via DFU option bytes
-     * before this firmware will work. See eopb0_setup.c or use:
-     *   dfu-util -a 1 -d 2e3c:df11 -s 0x1FFFF800 -D option_bytes48.bin */
-
-    /* Feed watchdog early — IWDG may still be running from previous boot
-     * (it can't be stopped once started, survives system reset) */
-    wdt_counter_reload();
-
-    /* Clock init to 240MHz */
+    /* Configure system clock */
     system_clock_config();
 
-    wdt_counter_reload();
+    /* FreeRTOS strictly requires NVIC Priority Group 4 for Cortex-M */
+    nvic_priority_group_config(NVIC_PRIORITY_GROUP_4);
+    __enable_irq();
 
     /* Enable peripheral clocks */
     crm_periph_clock_enable(CRM_GPIOA_PERIPH_CLOCK, TRUE);
@@ -398,40 +405,21 @@ int main(void)
     crm_periph_clock_enable(CRM_IOMUX_PERIPH_CLOCK, TRUE);
     crm_periph_clock_enable(CRM_XMC_PERIPH_CLOCK, TRUE);
 
-#if FPGA_WARM_HANDOFF_TEST
-    /* Warm-handoff round 2: drive the FPGA control pins to stock's scope-run
-     * posture as EARLY as possible (right after the GPIO clocks) to minimise
-     * the float window. Round 1 left these floating through ~2 s of init, which
-     * knocked the FPGA out of continuous-capture; we caught one buffer then it
-     * went idle. Restore PC6(SPI-en)=HIGH, PB11(active)=HIGH, PC11(meter mux)=LOW
-     * (scope posture) before anything else. See docs/fpga_warm_handoff_test.md. */
-    GPIOC->cfglr = (GPIOC->cfglr & ~(0xFu << 24)) | (0x3u << 24); /* PC6 PP 50MHz */
-    GPIOC->scr   = (1u << 6);                                     /* PC6 HIGH */
-    GPIOB->cfghr = (GPIOB->cfghr & ~(0xFu << 12)) | (0x3u << 12); /* PB11 PP 50MHz */
-    GPIOB->scr   = (1u << 11);                                    /* PB11 HIGH */
-    GPIOC->cfghr = (GPIOC->cfghr & ~(0xFu << 12)) | (0x3u << 12); /* PC11 PP 50MHz */
-    GPIOC->clr   = (1u << 11);                                    /* PC11 LOW (scope) */
-#endif
-
     /* PB8 = LCD backlight ON */
     GPIOB->cfghr = (GPIOB->cfghr & ~(0xF << 0)) | (0x3 << 0); /* PB8 push-pull 50MHz */
     GPIOB->scr = (1 << 8);
 #endif
 
-    /* Initialize battery ADC (PB1) */
+    /* Initialize battery ADC */
     battery_adc_init();
 
-    wdt_counter_reload();
+    /* Check USB connection to skip DOOM and enter storage mode */
+    if (battery_is_charging()) {
+        g_skip_doom = true;
+    }
 
-    /* Initialize theme system */
-    theme_init(THEME_DARK_BLUE);
-
-    /* Initialize oscilloscope state */
-    scope_state_init(scope_state_get());
-
-    /* Initialize LCD — using proven hwtest approach */
+    /* Initialize LCD */
     {
-        /* GPIO config for EXMC pins (same as hwtest) */
         #define _GPIO_CFG(base, pin, mode, cnf) do { \
             volatile uint32_t *r = (pin < 8) ? \
                 (volatile uint32_t *)(base + 0x00) : \
@@ -443,22 +431,18 @@ int main(void)
             *r = v; \
         } while(0)
 
-        /* PD0,1,4,5,7,8,9,10,11,12,14,15 as AF push-pull */
         uint8_t pd_pins[] = {0,1,4,5,7,8,9,10,11,12,14,15};
-        for (int i = 0; i < 12; i++)
-            _GPIO_CFG(0x40011400, pd_pins[i], 3, 2);
-        /* PE7-15 as AF push-pull */
-        for (int i = 7; i <= 15; i++)
-            _GPIO_CFG(0x40011800, i, 3, 2);
+        for (int i = 0; i < 12; i++) _GPIO_CFG(0x40011400, pd_pins[i], 3, 2);
+        for (int i = 7; i <= 15; i++) _GPIO_CFG(0x40011800, i, 3, 2);
 
-        /* EXMC config — proven working values */
+        /* EXMC config */
         *(volatile uint32_t *)0xA0000000 = 0x00005010;
         *(volatile uint32_t *)0xA0000004 = 0x02020424;
         *(volatile uint32_t *)0xA0000104 = 0x00000202;
         *(volatile uint32_t *)0xA0000000 |= 0x0001;
         delay_ms(50);
 
-        /* LCD init — proven working sequence from hwtest */
+        /* LCD init */
         lcd_write_cmd(0x01);  /* Software reset */
         delay_ms(200);
         lcd_write_cmd(0x11);  /* Sleep out */
@@ -473,122 +457,63 @@ int main(void)
         delay_ms(10);
         lcd_write_cmd(0x29);  /* Display on */
         delay_ms(50);
-
         #undef _GPIO_CFG
     }
 
-    wdt_counter_reload();
-    /* LCD init complete — UI will be drawn by FreeRTOS display task */
-
-    /*
-     * FFT engine is initialized ON DEMAND when user enters FFT view
-     * (via BTN_PRM in input_handler.c). This keeps the 88KB shared
-     * memory pool free for other features until actually needed.
-     */
+    if (doom_flash_diag.magic == DOOM_FLASH_DIAG_MAGIC) {
+        show_flash_diag();
+    }
 
 #ifndef EMULATOR_BUILD
-    /* Initialize signal generator and DAC hardware */
-    {
-        extern void dac_output_init(void);
-        dac_output_init();
-
-        siggen_config_t sg_cfg;
-        sg_cfg.waveform       = SIGGEN_SINE;
-        sg_cfg.frequency_hz   = 1000.0f;
-        sg_cfg.amplitude_vpp  = 3.3f;
-        sg_cfg.offset_v       = 0.0f;
-        sg_cfg.duty_cycle_pct = 50;
-        sg_cfg.output_enabled = false;
-        siggen_init(&sg_cfg);
-    }
+    /* Initialize DAC for audio */
+    dac_output_init();
 #endif
 
-    /* Initialize meter data parser */
-    meter_data_init();
-
-    /* Factory calibration stub: initializes the flash_fs mutex and
-     * attempts to load per-channel cal blobs from SPI flash into the
-     * RAM mirror. Currently a no-op read (real SPI flash driver is not
-     * yet wired) — meter/scope paths still use built-in defaults.
-     * Phase 3 will apply the loaded coefficients. */
+    /* Initialize SPI Flash FS */
     (void)flash_fs_init();
-    (void)flash_fs_load_factory_cal();
 
 #ifndef EMULATOR_BUILD
-    /* Initialize FPGA communication (USART2 + SPI3 + boot sequence).
-     * Must happen after clock init and GPIO clocks are enabled.
-     * Sends boot commands, configures SPI3 Mode 3, performs handshake,
-     * sets PB11 HIGH (FPGA active mode) and PC6 HIGH (SPI enable). */
-    /* Initialize USB CDC debug shell (HICK 48MHz clock + CDC class).
-     * Must happen after clock init. Enables USB pull-up so device
-     * appears on the bus immediately — the debug task handles data
-     * once the scheduler starts. */
-    usb_debug_init();
+    /* DOOM's framebuffer and zone allocator occupy addresses above the
+     * default 96KB SRAM window. EOPB0=0xFE enables the full 224KB. */
+    g_eopb0 = USD->eopb0;
+#endif
 
-    wdt_counter_reload();
-    fpga_init();
-    wdt_counter_reload();
+    /* Probe the root directory before FreeRTOS starts. The no-WAD path then
+     * performs no SPI access from a task stack. */
+    if (!g_skip_doom) {
+        g_wad_found = find_doom_wad(&g_iwad_addr, &g_iwad_size);
+    }
+
+    /* USB storage is only needed in explicit PRM recovery mode. Starting it
+     * during normal boot can service a stale USB IRQ inherited from the
+     * bootloader before the device core is ready. */
+    if (g_skip_doom) {
+        (void)usb_msc_init();
+    } else {
+#ifndef EMULATOR_BUILD
+        nvic_irq_disable(USBFS_L_CAN1_RX0_IRQn);
+        NVIC_ClearPendingIRQ(USBFS_L_CAN1_RX0_IRQn);
+        crm_periph_reset(CRM_USB_PERIPH_RESET, TRUE);
+        crm_periph_reset(CRM_USB_PERIPH_RESET, FALSE);
+#endif
+    }
+
+    /* Start IWDG — 3 second timeout. Must be fed via watchdog_feed() in
+     * the display task loop. If the display task stalls, MCU resets. */
+#if !defined(EMULATOR_BUILD) && !defined(GUEST_BUILD)
+    watchdog_init();
 #endif
 
     /* Create queues */
-    xDisplayQueue = xQueueCreate(20, sizeof(uint8_t));
-    xInputQueue   = xQueueCreate(15, sizeof(button_id_t));
-
-    /* Initialize button matrix scan driver (TMR3 ISR at 500Hz).
-     * This replaces the old passive GPIO reads that didn't work on hardware.
-     * The driver handles all GPIO config for the 4x3 matrix + 3 passive pins. */
-    button_scan_init(xInputQueue);
+    xInputQueue = xQueueCreate(15, sizeof(button_id_t));
+    /* button_scan_init() is called inside vInputTask after scheduler starts */
 
     /* Create tasks */
-    xTaskCreate(vDisplayTask, "display", 768, NULL, 1, &xDisplayTaskHandle);
-    xTaskCreate(vInputTask,   "key",     384, NULL, 4, &xInputTaskHandle);
+    xTaskCreate(vDisplayTask, "display", 4096, NULL, 1, &xDisplayTaskHandle);
+    xTaskCreate(vInputTask,   "key",     512,  NULL, 4, &xInputTaskHandle);
 
-    /* Register tasks with health monitor */
-    health_slot_display = health_register("display", xDisplayTaskHandle);
-    health_slot_input   = health_register("key",     xInputTaskHandle);
-
-#ifndef EMULATOR_BUILD
-    /* Create FPGA communication tasks (USART TX/RX + SPI3 acquisition).
-     * These match the stock firmware's dvom_TX, dvom_RX, and fpga tasks. */
-    fpga_create_tasks();
-
-    /* Create USB debug shell task (CDC virtual serial port).
-     * Priority 2 — above display (1) but below input (4) and FPGA tasks. */
-    usb_debug_create_task();
-
-    /* Device boots into oscilloscope mode — send scope FPGA commands and
-     * queue initial SPI3 acquisition triggers. The triggers will be waiting
-     * in the queue when vTaskStartScheduler() kicks off the acq task. */
-    fpga_enter_scope_mode();
-#endif
-
-    /* Create 1-second timer for uptime/status updates */
-    TimerHandle_t xSecTimer = xTimerCreate(
-        "1sec", pdMS_TO_TICKS(1000), pdTRUE, NULL, vOneSecondTimerCallback);
-    if (xSecTimer != NULL) {
-        xTimerStart(xSecTimer, 0);
-    }
-
-    /* Create 500ms health check timer — monitors tasks + feeds watchdog */
-    TimerHandle_t xHealthTimer = xTimerCreate(
-        "health", pdMS_TO_TICKS(500), pdTRUE, NULL, vHealthCheckCallback);
-    if (xHealthTimer != NULL) {
-        xTimerStart(xHealthTimer, 0);
-    }
-
-    /* Boot validation: tell the bootloader we started successfully.
-     * Clears the boot attempt counter so we won't enter safe mode on
-     * next reset. Must be called after LCD init and task creation —
-     * if we got here, the firmware is healthy. */
+    /* Validate boot — clears 3-strike counter so bootloader won't enter safe mode */
     boot_validate();
-
-    /* Initialize watchdog LAST — after all tasks and timers are running.
-     * Once enabled, the FWDGT cannot be stopped (hardware limitation).
-     * Skipped in GUEST_BUILD so interactive SPI3 shell sessions on unit #2
-     * can't trip a watchdog reset mid-experiment. */
-#ifndef GUEST_BUILD
-    watchdog_init();
-#endif
 
     vTaskStartScheduler();
 
@@ -596,43 +521,28 @@ int main(void)
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * FreeRTOS Hooks
+ * FreeRTOS Hooks & Fault Display
  * ═══════════════════════════════════════════════════════════════════ */
+
+/* fault_display() is defined in watchdog.c */
 
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
     (void)xTask;
     taskDISABLE_INTERRUPTS();
-    fault_display("STACK OVERFLOW", pcTaskName);
-    /* Watchdog will reset us */
+    fault_display("STACK OVF", pcTaskName ? pcTaskName : "?");
     for (;;) {}
 }
 
 void vApplicationMallocFailedHook(void)
 {
     taskDISABLE_INTERRUPTS();
-    fault_display("HEAP EXHAUSTED", "pvPortMalloc returned NULL");
-    /* Watchdog will reset us */
+    fault_display("MALLOC FAIL", "heap exhausted");
     for (;;) {}
 }
 
-/* ═══════════════════════════════════════════════════════════════════
- * SystemInit override for emulator
- * ═══════════════════════════════════════════════════════════════════ */
 #ifdef EMULATOR_BUILD
-/* Must match AT32 HAL declaration: "extern unsigned int system_core_clock".
- * The HAL's system_at32f403a_407.c also defines these symbols, but the
- * emu build uses --allow-multiple-definition so main.o's versions win
- * (linked first). */
 unsigned int system_core_clock = 240000000;
-
-void SystemInit(void)
-{
-    /* Stub — do nothing in emulator mode. */
-}
-
-void system_clock_config(void)
-{
-    /* Stub — do nothing in emulator mode. */
-}
+void SystemInit(void) {}
+void system_clock_config(void) {}
 #endif

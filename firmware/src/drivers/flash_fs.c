@@ -26,6 +26,9 @@
 static SemaphoreHandle_t fs_mutex  = NULL;
 static bool              fs_ready  = false;
 static bool              raw_spi_ready = false;
+static bool              jedec_valid = false;
+static uint8_t           jedec_id[3];
+static flash_fs_volume_info_t volumes[FLASH_FS_VOLUME_COUNT];
 
 #define SPI_FLASH_SPI       ((spi_type *)SPI2_BASE)
 #define SPI_FLASH_SIZE      FLASH_FS_RAW_MAX_ADDR
@@ -38,6 +41,49 @@ static bool              raw_spi_ready = false;
 
 /* Maximum path length (matching FatFS LFN limits) */
 #define FS_MAX_PATH  128
+
+static uint16_t read_le16(const uint8_t *p)
+{
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static bool flash_fs_probe_fat12(uint32_t index, uint32_t base)
+{
+    uint8_t boot[512];
+    flash_fs_volume_info_t *volume = &volumes[index];
+
+    memset(volume, 0, sizeof(*volume));
+    volume->base_address = base;
+
+    if (flash_fs_raw_read_bytes(base, boot, sizeof(boot)) != FLASH_FS_OK) {
+        return false;
+    }
+
+    uint16_t bytes_per_sector = read_le16(&boot[11]);
+    uint16_t total_sectors = read_le16(&boot[19]);
+    uint16_t root_entries = read_le16(&boot[17]);
+    uint8_t sectors_per_cluster = boot[13];
+    bool sector_size_ok = bytes_per_sector == 512u ||
+                          bytes_per_sector == 1024u ||
+                          bytes_per_sector == 2048u ||
+                          bytes_per_sector == 4096u;
+
+    if (memcmp(&boot[3], "MSDOS5.0", 8) != 0 ||
+        memcmp(&boot[54], "FAT12   ", 8) != 0 ||
+        boot[510] != 0x55 || boot[511] != 0xAA ||
+        !sector_size_ok || sectors_per_cluster == 0 ||
+        total_sectors == 0 || root_entries == 0) {
+        return false;
+    }
+
+    volume->bytes_per_sector = bytes_per_sector;
+    volume->total_sectors = total_sectors;
+    volume->root_entries = root_entries;
+    volume->sectors_per_cluster = sectors_per_cluster;
+    volume->size_bytes = (uint32_t)bytes_per_sector * total_sectors;
+    volume->mounted = volume->size_bytes <= (SPI_FLASH_SIZE - base);
+    return volume->mounted;
+}
 
 /* ═══════════════════════════════════════════════════════════════════
  * Internal helpers
@@ -130,15 +176,20 @@ flash_fs_error_t flash_fs_init(void)
         return FLASH_FS_ERR_MUTEX;
     }
 
-    /* TODO: Initialize SPI flash driver (W25Q128 via SPI1)
-     * TODO: Mount FatFS filesystem
-     *   FATFS fs;
-     *   FRESULT res = f_mount(&fs, "2:", 1);
-     *   if (res != FR_OK) return FLASH_FS_ERR_MOUNT;
-     */
+    flash_fs_error_t result = flash_fs_raw_read_jedec(&jedec_id[0],
+                                                       &jedec_id[1],
+                                                       &jedec_id[2]);
+    jedec_valid = result == FLASH_FS_OK &&
+                  jedec_id[0] == 0xEF && jedec_id[1] == 0x40 &&
+                  jedec_id[2] == 0x18;
+    if (!jedec_valid) {
+        return FLASH_FS_ERR_READ;
+    }
 
-    fs_ready = true;
-    return FLASH_FS_OK;
+    bool volume0_ok = flash_fs_probe_fat12(0, 0x000000u);
+    bool volume1_ok = flash_fs_probe_fat12(1, 0x200000u);
+    fs_ready = volume0_ok && volume1_ok;
+    return fs_ready ? FLASH_FS_OK : FLASH_FS_ERR_MOUNT;
 }
 
 flash_fs_error_t flash_fs_write_atomic(const char *path, const void *data, uint32_t len)
@@ -152,7 +203,7 @@ flash_fs_error_t flash_fs_write_atomic(const char *path, const void *data, uint3
         return FLASH_FS_ERR_MUTEX;
     }
 
-    flash_fs_error_t result = FLASH_FS_OK;
+    flash_fs_error_t result = FLASH_FS_ERR_WRITE;
 
     /* Build temporary file path */
     char tmp_path[FS_MAX_PATH];
@@ -264,12 +315,29 @@ flash_fs_error_t flash_fs_delete(const char *path)
     (void)path;
 
     xSemaphoreGive(fs_mutex);
-    return FLASH_FS_OK;
+    return FLASH_FS_ERR_WRITE;
 }
 
 bool flash_fs_is_ready(void)
 {
     return fs_ready;
+}
+
+bool flash_fs_get_jedec(uint8_t *manufacturer, uint8_t *memory_type,
+                        uint8_t *capacity)
+{
+    if (!jedec_valid) {
+        return false;
+    }
+    if (manufacturer) *manufacturer = jedec_id[0];
+    if (memory_type)  *memory_type = jedec_id[1];
+    if (capacity)     *capacity = jedec_id[2];
+    return true;
+}
+
+const flash_fs_volume_info_t *flash_fs_volume(uint32_t index)
+{
+    return index < FLASH_FS_VOLUME_COUNT ? &volumes[index] : NULL;
 }
 
 flash_fs_error_t flash_fs_raw_read_jedec(uint8_t *manufacturer,
@@ -323,18 +391,167 @@ flash_fs_error_t flash_fs_raw_read_bytes(uint32_t addr, void *buf, uint32_t len)
         return FLASH_FS_ERR_MUTEX;
     }
 
+    flash_fs_raw_read_bytes_direct(addr, out, len);
+
+    xSemaphoreGive(fs_mutex);
+    return FLASH_FS_OK;
+}
+
+flash_fs_error_t flash_fs_raw_read_bytes_direct(uint32_t addr, void *buf,
+                                                 uint32_t len)
+{
+    uint8_t *out = (uint8_t *)buf;
+    if (buf == NULL || addr >= SPI_FLASH_SIZE ||
+        len > (SPI_FLASH_SIZE - addr)) {
+        return FLASH_FS_ERR_READ;
+    }
+    if (len == 0) {
+        return FLASH_FS_OK;
+    }
+
+    flash_fs_raw_spi_init_once();
     SPI_FLASH_CS_ASSERT();
     flash_fs_raw_spi_xfer(0x03);
     flash_fs_raw_spi_xfer((uint8_t)(addr >> 16));
     flash_fs_raw_spi_xfer((uint8_t)(addr >> 8));
-    flash_fs_raw_spi_xfer((uint8_t)(addr));
-
+    flash_fs_raw_spi_xfer((uint8_t)addr);
     for (uint32_t i = 0; i < len; i++) {
         out[i] = flash_fs_raw_spi_xfer(0xFF);
     }
-
     SPI_FLASH_CS_DEASSERT();
-    xSemaphoreGive(fs_mutex);
+    return FLASH_FS_OK;
+}
+
+#define FAT1_WRITE_BASE       0x00200000u
+#define FAT1_WRITE_SIZE       (14u * 1024u * 1024u)
+#define SPI_ERASE_SECTOR_SIZE 4096u
+#define SPI_PROGRAM_PAGE_SIZE 256u
+#define SPI_BUSY_TIMEOUT      8000000u
+
+static uint8_t fat1_sector_buffer[SPI_ERASE_SECTOR_SIZE];
+static uint8_t fat1_verify_buffer[SPI_PROGRAM_PAGE_SIZE];
+
+static uint8_t flash_fs_raw_status(void)
+{
+    uint8_t status;
+    SPI_FLASH_CS_ASSERT();
+    flash_fs_raw_spi_xfer(0x05);
+    status = flash_fs_raw_spi_xfer(0xFF);
+    SPI_FLASH_CS_DEASSERT();
+    return status;
+}
+
+static bool flash_fs_raw_wait_ready(void)
+{
+    uint32_t timeout = SPI_BUSY_TIMEOUT;
+    while ((flash_fs_raw_status() & 0x01u) != 0 && --timeout) {}
+    return timeout != 0;
+}
+
+static bool flash_fs_raw_write_enable(void)
+{
+    if (!flash_fs_raw_wait_ready()) return false;
+    SPI_FLASH_CS_ASSERT();
+    flash_fs_raw_spi_xfer(0x06);
+    SPI_FLASH_CS_DEASSERT();
+    return (flash_fs_raw_status() & 0x02u) != 0;
+}
+
+static bool flash_fs_raw_erase_sector(uint32_t addr)
+{
+    if (!flash_fs_raw_write_enable()) return false;
+    SPI_FLASH_CS_ASSERT();
+    flash_fs_raw_spi_xfer(0x20);
+    flash_fs_raw_spi_xfer((uint8_t)(addr >> 16));
+    flash_fs_raw_spi_xfer((uint8_t)(addr >> 8));
+    flash_fs_raw_spi_xfer((uint8_t)addr);
+    SPI_FLASH_CS_DEASSERT();
+    return flash_fs_raw_wait_ready();
+}
+
+static bool flash_fs_raw_program_page(uint32_t addr, const uint8_t *data)
+{
+    if (!flash_fs_raw_write_enable()) return false;
+    SPI_FLASH_CS_ASSERT();
+    flash_fs_raw_spi_xfer(0x02);
+    flash_fs_raw_spi_xfer((uint8_t)(addr >> 16));
+    flash_fs_raw_spi_xfer((uint8_t)(addr >> 8));
+    flash_fs_raw_spi_xfer((uint8_t)addr);
+    for (uint32_t i = 0; i < SPI_PROGRAM_PAGE_SIZE; i++)
+        flash_fs_raw_spi_xfer(data[i]);
+    SPI_FLASH_CS_DEASSERT();
+    return flash_fs_raw_wait_ready();
+}
+
+flash_fs_error_t flash_fs_fat1_write_bytes_direct(uint32_t offset,
+                                                   const void *buf,
+                                                   uint32_t len)
+{
+    const uint8_t *input = (const uint8_t *)buf;
+    if (buf == NULL || offset > FAT1_WRITE_SIZE ||
+        len > FAT1_WRITE_SIZE - offset) {
+        return FLASH_FS_ERR_WRITE;
+    }
+    if (len == 0) return FLASH_FS_OK;
+
+    flash_fs_raw_spi_init_once();
+    if (!flash_fs_raw_wait_ready() || (flash_fs_raw_status() & 0x1Cu) != 0)
+        return FLASH_FS_ERR_WRITE;
+
+    while (len != 0) {
+        uint32_t address = FAT1_WRITE_BASE + offset;
+        uint32_t sector = address & ~(SPI_ERASE_SECTOR_SIZE - 1u);
+        uint32_t within = address - sector;
+        uint32_t chunk = SPI_ERASE_SECTOR_SIZE - within;
+        if (chunk > len) chunk = len;
+
+        if (flash_fs_raw_read_bytes_direct(sector, fat1_sector_buffer,
+                                           sizeof(fat1_sector_buffer)) !=
+            FLASH_FS_OK) {
+            return FLASH_FS_ERR_READ;
+        }
+
+        uint16_t changed_pages = 0;
+        bool erase_needed = false;
+        for (uint32_t i = 0; i < chunk; i++) {
+            uint8_t old_value = fat1_sector_buffer[within + i];
+            uint8_t new_value = input[i];
+            if (old_value != new_value) {
+                changed_pages |= (uint16_t)(1u << ((within + i) / 256u));
+                if ((new_value & (uint8_t)~old_value) != 0)
+                    erase_needed = true;
+            }
+        }
+        memcpy(&fat1_sector_buffer[within], input, chunk);
+
+        if (changed_pages != 0) {
+            if (erase_needed) {
+                if (!flash_fs_raw_erase_sector(sector))
+                    return FLASH_FS_ERR_WRITE;
+                changed_pages = 0xFFFFu;
+            }
+            for (uint32_t page = 0; page < 16u; page++) {
+                if ((changed_pages & (1u << page)) == 0) continue;
+                uint32_t page_address = sector + page * SPI_PROGRAM_PAGE_SIZE;
+                if (!flash_fs_raw_program_page(page_address,
+                        &fat1_sector_buffer[page * SPI_PROGRAM_PAGE_SIZE])) {
+                    return FLASH_FS_ERR_WRITE;
+                }
+                if (flash_fs_raw_read_bytes_direct(page_address,
+                        fat1_verify_buffer, sizeof(fat1_verify_buffer)) !=
+                        FLASH_FS_OK ||
+                    memcmp(fat1_verify_buffer,
+                           &fat1_sector_buffer[page * SPI_PROGRAM_PAGE_SIZE],
+                           SPI_PROGRAM_PAGE_SIZE) != 0) {
+                    return FLASH_FS_ERR_WRITE;
+                }
+            }
+        }
+
+        offset += chunk;
+        input += chunk;
+        len -= chunk;
+    }
     return FLASH_FS_OK;
 }
 

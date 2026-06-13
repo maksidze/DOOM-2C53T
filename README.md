@@ -1,88 +1,77 @@
-# OpenScope 2C53T
+# DOOM Port for FNIRSI 2C53T Oscilloscope
 
-**Open-source replacement firmware for the FNIRSI 2C53T handheld oscilloscope / multimeter / signal generator.**
+This repository contains a port of the legendary game **DOOM** for the **FNIRSI 2C53T** handheld 3-in-1 instrument (oscilloscope, multimeter, waveform generator). 
+
+This project is based on the **MG24 Doom BLE** codebase by [Nicola Wrachien (next-hack)](https://github.com/next-hack/MG24_Doom_BLE), which in turn is based on the GBA Doom Port by `doomhack` with improvements by `Kippyykip`. The code is optimized to run under tight RAM constraints and adapted for the hardware of the FNIRSI 2C53T.
 
 <p align="center">
-  <img src="scope.jpg" alt="FNIRSI 2C53T" width="300">
+  <img src="scope.jpg" alt="FNIRSI 2C53T DOOM" width="400">
 </p>
 
-The FNIRSI 2C53T is a capable $75 handheld 3-in-1 instrument held back by buggy stock firmware. This project is a complete clean-room firmware rewrite built from reverse engineering the original binary.
+---
 
-> **Looking for contributors with test equipment.** The firmware runs on real hardware — UI, meter, bootloader, and button input all work. The next milestones (live oscilloscope waveforms, factory calibration) need hardware captures we can't do with a single bench unit. If you have a 2C53T and a logic analyzer, or experience with Gowin FPGAs, [see how you can help](#help-wanted).
+## Key Features of the Port
 
-## Current Status
+*   **High-Quality Graphics:** The game renders at the original 320x200 resolution and is hardware-stretched to the 320x240 screen resolution (ST7789V via 16-bit parallel EXMC interface). Deep lighting (Z-depth lighting) is supported.
+*   **Button Controls:** Support for all 15 physical buttons on the device (scanned at 500 Hz with hardware debouncing).
+*   **Real-time OS:** Powered by FreeRTOS with separate tasks for rendering graphics and processing input.
 
-**Custom firmware runs on real hardware.** The UI, button input, battery management, and USB bootloader all work. Active development is focused on getting live oscilloscope data from the FPGA.
+---
 
-### Working on hardware today
-- 4 navigable UI modes: oscilloscope, multimeter, signal generator, settings
-- 4 color themes (Dark Blue, Classic Green, High Contrast, Night Red)
-- Variable-width bitmap fonts at 4 sizes (12/16/24/48px)
-- FreeRTOS with display + input tasks
-- 15/15 button matrix scanning at 500Hz
-- Battery monitor with percentage, USB charge detection, low-battery auto-off
-- Soft power management (3-2-1 countdown shutdown)
-- Watchdog and health monitoring
-- USB HID bootloader for closed-case firmware updates
-- FPGA USART communication (bidirectional, meter data flowing)
+## Hardware Specifications
 
-### Implemented, tested, awaiting real data
-These algorithms are written and unit-tested, but currently run on demo waveforms. They'll come alive once FPGA ADC data flows through SPI3.
+| Component | Specification |
+| :--- | :--- |
+| **MCU** | Artery AT32F403A (ARM Cortex-M4F @ 240 MHz) |
+| **SRAM** | 224 KB (activated via the `EOPB0 = 0xFE` configuration option) |
+| **Screen** | ST7789V 320x240 RGB565 (16-bit parallel EXMC/XMC bus) |
+| **Storage (SPI Flash)** | Winbond W25Q128JVSQ (16 MB). Split into Volume 0 (2 MB, official firmware resources) and Volume 1 (14 MB FAT12, starting at address `0x00200000` where the WAD file is stored) |
+| **Input** | 15-button matrix keyboard |
 
-- FFT spectrum analyzer (4096-point, 5 window functions, averaging, max hold)
-- Protocol decoders (UART, SPI, I2C, CAN, K-Line/KWP2000)
-- Math channels (CH1+CH2, CH1-CH2, CH1*CH2, invert)
-- Auto-measurements (frequency, Vpp, Vrms, duty cycle)
-- Persistence display (5 decay modes)
-- Bode plot engine (log sweep, gain/phase calculation)
-- Signal generator (DDS, 4 waveforms)
-- Component tester (resistor, capacitor, ESR, diode, continuity)
-- XY mode, roll mode, trend plotting
-- Mask/pass-fail testing
-- Config save/load with checksum
-- Screenshot capture (BMP)
+---
 
-### In progress
-- **FPGA SPI3 data acquisition** — **major breakthrough (Jun 2026).** A community logic-analyzer capture of a stock boot ([issue #18](https://github.com/DavidClawson/OpenScope-2C53T/issues/18), thanks to @maksidze) revealed that our FPGA configuration bitstream had been extracted from the wrong flash offset — we'd been uploading garbage. With the corrected 115,638-byte bitstream, the FPGA now accepts the config and the PC0 data-ready line arms for the first time. Remaining work: implement the per-channel `0x04`/`0x05` sample-read protocol the capture revealed and wire it to the waveform renderer. This is the critical path to a working oscilloscope.
+## Controls on the Device
 
-## Hardware
+Gameplay is fully controlled via the oscilloscope keypad:
 
-| Component | Details |
-|-----------|---------|
-| **MCU** | Artery AT32F403A — ARM Cortex-M4F @ 240MHz, 1MB flash, 224KB SRAM |
-| **Display** | ST7789V 320x240 RGB565 via 16-bit parallel bus (EXMC) |
-| **FPGA** | Gowin GW1N-UV2 — handles 250MS/s ADC sampling |
-| **ADC** | Dual-channel, 8-bit, 250MS/s via FPGA SPI3 |
-| **Signal Gen** | 2-channel 12-bit DAC |
-| **Flash** | Winbond W25Q128JVSQ (16MB) — UI assets and calibration |
-| **Input** | 15 buttons (4x3 scanned matrix + 3 passive) |
+*   **Arrow Keys (`BTN_UP` / `BTN_DOWN` / `BTN_LEFT` / `BTN_RIGHT`)** — Move and turn the character.
+*   **`OK` Button** — Shoot (FIRE).
+*   **`MENU` Button** — Action (open doors, press buttons - USE).
+*   **`AUTO` Button** — Run (SPEED/RUN).
+*   **`SAVE` Button** — Bring up the DOOM game menu (MENU).
+*   **`CH1` Button** — Select next weapon.
+*   **`CH2` Button** — Select previous weapon.
+*   **`MENU` + `POWER` Combination** — Instant reboot into DFU bootloader mode (for firmware updates).
+*   **Holding `POWER` (3 seconds)** — Soft power down of the device.
 
-> The MCU markings are sanded off. We identified it as AT32F403A through register probing — it's register-compatible with GD32/STM32F1 at the GPIO level.
+---
 
-## Getting Started
+## Loading the Game (WAD file)
 
-### Prerequisites
+To run the game, you need a game resource file — either the original `DOOM1.WAD` (Shareware version of Doom) or the full commercial version `DOOM.WAD` (renamed to `DOOM1.WAD`).
 
-**Toolchain:**
+1.  Turn off the oscilloscope.
+2.  Go to Settings - USB Sharing - ON.
+3.  Connect the device to a computer using a USB-C cable. The computer will detect the device as a standard USB flash drive (FAT12 drive).
+4.  Copy the `DOOM1.WAD` file to the root directory of the drive.
+5.  Press OK to exit USB Sharing mode.
+6.  Flash the custom firmware (see the "Building and Flashing" section).
 
-```bash
-# macOS (Homebrew)
-brew install --cask gcc-arm-embedded    # ARM toolchain
-brew install dfu-util                    # USB DFU flasher
+*Note: If the file is not found or is corrupted, the device will display a `DOOM1.WAD NOT FOUND` error.*
 
-# Linux (Debian/Ubuntu)
-sudo apt install gcc-arm-none-eabi libnewlib-arm-none-eabi
-sudo apt install dfu-util make
+---
 
-# Windows
-# Install ARM GNU Toolchain from https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads
-# Install dfu-util from https://dfu-util.sourceforge.net/
-# Build with Make (via MSYS2, WSL, or similar)
-```
+## Building and Flashing
 
-**Dependencies (all platforms):**
+### System Requirements
 
-The firmware depends on two libraries that aren't bundled in the repo. Clone them into the `firmware/` directory:
+An ARM GCC compiler and build utilities are required:
+*   **Windows:** Install ARM GNU Toolchain (arm-none-eabi-gcc), `make` (via MSYS2 or WSL), and `dfu-util`.
+*   **macOS / Linux:** Install `gcc-arm-none-eabi` and `dfu-util` using your package manager (apt, brew).
+
+### Preparing Dependencies
+
+Clone the missing external libraries inside the `firmware/` directory:
 
 ```bash
 cd firmware
@@ -90,151 +79,39 @@ git clone https://github.com/ArteryTek/AT32F403A_407_Firmware_Library.git at32f4
 git clone https://github.com/FreeRTOS/FreeRTOS-Kernel.git FreeRTOS
 ```
 
-**Build once before flashing:**
+### Compiling
 
-```bash
-cd firmware && make
-```
-
-This populates `firmware/build/` with `firmware.bin`, `bootloader.bin`, and `option_bytes48.bin` (a 48-byte blob used by the one-time option-byte DFU write below).
-
-### First-Time Hardware Setup
-
-The first flash requires opening the case to enter the AT32's **ROM DFU mode** — this is the only mode that can write option bytes. After the initial flash installs the USB HID bootloader, all future updates go over USB-C with the case closed.
-
-> **Two bootloaders — don't confuse them.** *ROM DFU* (entered via BOOT0 + pinhole reset, LCD dark, `2e3c:df11`) is required for the one-time EOPB0 setup. The *USB HID bootloader* (Settings → Firmware Update, "BOOTLOADER MODE" on the LCD) handles every update after that but cannot write option bytes.
-
-**See the full walkthrough with photos: [DFU Mode Guide](docs/dfu_mode_guide.md)**
-
-The short version:
-
-1. Open the case (6 Phillips screws on back)
-2. Use a jumper wire to bridge 3.3V (from the SWD header near USB-C) to the BOOT0 pull-down resistor (MCU side, near the main chip)
-3. While holding 3.3V on BOOT0, press the pinhole reset button, then release both
-4. Verify ROM DFU: `dfu-util -l` should list `2e3c:df11` with alt interfaces 0 (Internal Flash) and 1 (Option Byte)
-5. Set EOPB0 = 0xFE → 224KB SRAM mode (one-time):
-   ```bash
-   cd firmware
-   dfu-util -a 1 -d 2e3c:df11 -s 0x1FFFF800 -D build/option_bytes48.bin
-   ```
-   Expect `Download done. / File downloaded successfully`. The `Invalid DFU suffix signature` and `Error sending dfu abort request` warnings are cosmetic.
-6. Pinhole reset to stay in DFU, then flash the bootloader and application:
-   ```bash
-   make flash-all
-   ```
-7. Remove the BOOT0 jumper, pinhole reset, close the case — you won't need to open it again
-
-### Normal Development Cycle (case closed)
-
-Once the USB HID bootloader is installed, updates are simple:
-
-1. On the device: **Settings > Firmware Update** (shows "BOOTLOADER MODE" screen)
-2. On your computer:
-   ```bash
-   cd firmware && make flash
-   ```
-3. The device auto-reboots into the updated firmware
-
-### Restoring Stock or Flashing via USB-C (macOS & Linux)
-
-The device's **stock bootloader** also accepts firmware over USB-C — handy for restoring the original FNIRSI firmware or flashing without the HID bootloader. Hold **MENU + tap Power** to enter upgrade mode (the LCD shows "firmware upgrade"); the device mounts a FAT12 volume named `IAP`.
-
-> **macOS users:** do **not** drag-drop the `.bin` in Finder — macOS's FAT driver corrupts the write (the volume uses 2048-byte sectors and Finder adds AppleDouble `._` junk the bootloader misreads as firmware). Use the bundled flasher, which writes the device correctly:
-
-```bash
-brew install mtools                  # one-time (Linux: sudo apt install mtools)
-python3 scripts/iap_flash.py         # detect device → pick firmware → flash
-```
-
-It auto-detects the device and available images, verifies the stock firmware by SHA-256, and shows a progress bar. Subcommands: `status`, `list`, `flash <path>`, `doctor` (prerequisite check), `guide` (full walkthrough). A bad flash is never a brick — re-enter upgrade mode and reflash any image.
-
-**Windows** users can skip the tool — drag-drop the `.bin` onto the `IAP` drive (the official FNIRSI method; Windows' FAT driver handles the volume cleanly).
-
-### Build
-
+Build the firmware binary files:
 ```bash
 cd firmware
-make              # Build for hardware (AT32 @ 240MHz)
-make emu          # Build for emulator (skips hardware init)
+make guest
 ```
+After a successful build, the `firmware.bin` file will appear in the `firmware/build/` directory.
 
-### Emulator (no hardware required)
+Flashing the firmware:
+1.  Reboot the device into bootloader mode (`MENU` + `POWER` button combination).
+2.  Upload the firmware file into the IAP section.
+3.  The oscilloscope will automatically restart with the new firmware.
 
-```bash
-make renode              # Run in Renode with LCD display
-make renode-interactive  # Run with keyboard input
+To revert to the official firmware, flash the APP_2C53T_V1.2.0_251015.bin file.
+
+---
+
+## Additional Utilities
+
+*   `MCUDoomWadUtil` — a utility to optimize and pack WAD files (reduces RAM usage and increases load speed of lump resources). A pre-compiled version of the utility and the `mcudoom_0_4.wad` file are located in the corresponding directory.
+To use it, copy your DOOM.WAD file to the MCUDoomWadUtil directory and run the command:
 ```
-
-Requires [Renode](https://renode.io/) at `/Applications/Renode.app`. An SDL3 native LCD viewer is also available (`brew install sdl3 && cd emulator && make`).
-
-## Project Structure
-
+MCUDoomWadUtil.exe DOOM.WAD DOOM1.WAD
 ```
-firmware/               Custom replacement firmware (C + FreeRTOS + Make)
-  src/main.c            Entry point, FreeRTOS tasks, mode switching
-  src/drivers/          LCD, buttons, battery, watchdog, DFU boot
-  src/ui/               Scope, meter, siggen, settings, themes
-  src/dsp/              FFT, math channels, signal gen, Bode
-  src/decode/           Protocol decoders (UART, SPI, I2C, CAN, K-Line)
-  src/tasks/            Measurement engine, component tester, mask test
-  bootloader/           USB HID IAP bootloader (16KB)
+Copy the resulting DOOM1.WAD file to the root directory of your USB flash drive.
 
-reverse_engineering/    Hardware analysis and protocol documentation
-  ARCHITECTURE.md       System overview (start here for RE)
-  HARDWARE_PINOUT.md    Complete MCU pin assignments
-  FPGA_PROTOCOL_COMPLETE.md   Full FPGA command/data specification
-  COVERAGE.md           309 functions mapped from stock firmware
-  analysis_v120/        Detailed V1.2.0 analysis artifacts
+---
 
-emulator/               Renode platform + SDL3 LCD viewer
-docs/                   Design docs, analysis, planning (see docs/README.md)
-modules/                JSON procedure files (automotive, HVAC, ham radio)
-scripts/                Font generation, flash tools, soak testing
-```
+## Licenses and Acknowledgments
 
-## Documentation
-
-Start with the [Documentation Index](docs/README.md). Key documents:
-
-- [Architecture Overview](reverse_engineering/ARCHITECTURE.md) — How the hardware works
-- [FPGA Protocol](reverse_engineering/FPGA_PROTOCOL_COMPLETE.md) — ADC sampling and command interface
-- [Hardware Pinout](reverse_engineering/HARDWARE_PINOUT.md) — Every MCU pin mapped
-- [Roadmap](docs/roadmap.md) — What's done, what's next, future plans
-
-## Reverse Engineering
-
-The stock firmware was reverse-engineered using [Ghidra](https://ghidra-sre.org/). We've identified and named 309 functions, mapped all ~40 FPGA commands, fully documented the ADC data format, and traced every hardware pin. About 98% of the stock firmware is now understood.
-
-No FNIRSI source code is distributed in this repository. See [reverse_engineering/README.md](reverse_engineering/README.md) for methodology and legal basis.
-
-## Help Wanted
-
-The firmware is functionally complete for the UI layer, but the next milestones are blocked on hardware captures and experimentation that a single bench unit can't provide. **You don't need to write code to make a big contribution here.**
-
-### 1. ~~Logic analyzer captures of the stock firmware boot sequence~~ ✅ DONE
-**Solved June 2026** thanks to @maksidze ([issue #18](https://github.com/DavidClawson/OpenScope-2C53T/issues/18)), who patched the stock firmware's SPI prescaler to /64 and captured a full stock boot on a Saleae. That capture revealed our FPGA bitstream was extracted from the wrong file offset (we'd treated the flash address as a file offset, ignoring the `0x08007000` link base — the real bitstream is at file offset `0x4AD19`). The corrected bitstream is byte-exact against the capture and the FPGA now accepts it. Full decode: [`reverse_engineering/captures/`](reverse_engineering/captures/). Still useful: captures from **other board revisions** to confirm the bitstream and sequence generalize.
-
-### 2. Oscilloscope sample-read implementation
-The capture revealed the post-config read protocol: per-channel 1026-byte reads with opcodes `0x04` (CH1) / `0x05` (CH2), gated on the PC0 data-ready line. We're implementing this now. If you have a 2C53T + logic analyzer and want to help characterize the runtime trigger/timebase command sequence (the part that rides on USART, which the SPI capture couldn't see), open an issue. See [FPGA Protocol](reverse_engineering/FPGA_PROTOCOL_COMPLETE.md) for the full command table.
-
-### 3. Board variant documentation
-We've confirmed one board revision (V1.4) and one user has reported a different layout with no version marking. If your 2C53T looks different from [our photos](docs/images/), photos of your PCB (top and bottom) are extremely valuable — especially near the FPGA, SPI flash, and analog frontend.
-
-### 4. Everything else
-- **Test on your hardware** — different units reveal things a single bench unit can't
-- **Document what worked** — first-flash walkthroughs for Linux or Windows are always welcome
-- **Contribute modules** (`modules/*.json`) for your domain (automotive, HVAC, ham radio, etc.)
-- **Translate** — we have users in Korea and Russia already; localization help is welcome
-
-See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the full guide. Bug reports and feature requests are always welcome via the [issue tracker](https://github.com/DavidClawson/OpenScope-2C53T/issues).
-
-## Related Projects
-
-- [pecostm32/FNIRSI-1013D-1014D-Hack](https://github.com/pecostm32/FNIRSI-1013D-1014D-Hack) — Schematics, datasheets, and FPGA docs for the 1013D/1014D
-- [pecostm32/FNIRSI_1013D_Firmware](https://github.com/pecostm32/FNIRSI_1013D_Firmware) — Replacement firmware for the 1013D
-- [Atlan4/Fnirsi1013D](https://github.com/Atlan4/Fnirsi1013D) — Most active FNIRSI firmware fork (471 commits)
-- [Gissio/radpro](https://github.com/Gissio/radpro) — Custom firmware for FNIRSI Geiger counters
-
-## License
-
-[GNU General Public License v3.0](LICENSE)
+*   **DOOM Game Code**: Distributed under the GNU GPLv2 or later.
+*   **OPL2 Emulation and Optimizations**: Nicola Wrachien ([next-hack](https://github.com/next-hack/MG24_Doom_BLE)).
+*   **Hardware Drivers (Screen, Buttons, Flash)**: The [OpenScope 2C53T](https://github.com/DavidClawson/OpenScope-2C53T) project.
+*   **printf Library**: Marco Paland (MIT License).
+*   **Font8x8 Library**: Daniel Hepper (Public Domain).

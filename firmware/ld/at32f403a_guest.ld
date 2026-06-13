@@ -89,6 +89,8 @@ SECTIONS
   {
     . = ALIGN(4);
     _sdata = .;
+    *(.ramfunc)
+    *(.ramfunc*)
     *(.data)
     *(.data*)
     . = ALIGN(4);
@@ -137,6 +139,14 @@ SECTIONS
     . = . + _Min_Heap_Size;
     . = . + _Min_Stack_Size;
     . = ALIGN(8);
+  } >RAM
+
+  /* Reset-surviving flash diagnostic. The stock firmware stack tops out near
+     0x20036F90; guest stack starts at 0x20037FE0. Keep this after the normal
+     RAM sections so its fixed address does not advance their location. */
+  .flash_diag 0x20037F80 (NOLOAD) :
+  {
+    KEEP(*(.flash_diag))
   } >RAM
 
   /DISCARD/ :

@@ -1,9 +1,8 @@
 /*
  * OpenScope 2C53T - DAC Output Driver
  *
- * Drives the AT32F403A's 12-bit DAC1 (PA4) for signal generator output.
- * Uses TMR6 as trigger source and DMA2 Channel 3 for zero-CPU-overhead
- * continuous waveform output from a circular buffer.
+ * Drives both AT32F403A 12-bit DAC outputs (PA4 and PA5).
+ * Uses TMR6 as trigger source and DMA1 Channel 1 in circular mode.
  *
  * Architecture:
  *   siggen_fill_buffer() → dac_buffer[256] → DMA2 CH3 → DAC1 → PA4
@@ -19,7 +18,7 @@
 
 /* Waveform buffer size — one complete cycle.
  * Output frequency = sample_rate / DAC_BUFFER_SIZE */
-#define DAC_BUFFER_SIZE  256
+#define DAC_BUFFER_SIZE  1024
 
 /*
  * Initialize DAC1 hardware:
@@ -57,7 +56,11 @@ void dac_output_set_rate(uint32_t sample_rate);
  * Get pointer to the waveform buffer for filling.
  * Buffer holds DAC_BUFFER_SIZE uint16_t values (12-bit, 0-4095).
  */
-uint16_t *dac_output_get_buffer(void);
+/* Each word packs DAC2 in bits 27:16 and DAC1 in bits 11:0. */
+uint32_t *dac_output_get_buffer(void);
+
+/* Current DMA read position in the circular waveform buffer. */
+uint16_t dac_output_get_position(void);
 
 /*
  * Check if DAC output is currently active.

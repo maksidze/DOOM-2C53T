@@ -78,10 +78,3 @@ node_modules/
 archive/w25q128_dump_*.bin
 archive/w25q128_assets/
 reverse_engineering/captures/export/
-
-# Stray bench photos / screenshots dropped in the repo root (keep docs/images/ committable)
-/*.jpeg
-/*.jpg
-/*.HEIC
-/*.heic
-/*.png

@@ -428,9 +428,7 @@ static void cmd_help(void)
         "spi3 read [len]                 Raw SPI3 read + hex dump\r\n"
         "spi3 xfer <hex...>              Send arbitrary MOSI bytes, dump MISO\r\n"
         "spi3 seq <b..> | <b..>          xfer w/ mid-sequence CS pulse at '|'\r\n"
-        "fpga reinit [br][gap][close][f0|1|2][u<ms>][a-e<pin>][s2|sd[h|l]][tc<n>] Replay cfg\r\n"
-        "    f=prelude frame: 0 split(stock) 1 combined 2 merge15+3B; u=pre-upload gap; k<br>=cmd-phase clk div; tc<n>=trailing clocks\r\n"
-        "    pe=probe SYSTEM_EDIT_MODE after 0x15 (STATUS@/256); rl=send 0x3C RELOAD before prelude; reports 0x41 STATUS\r\n"
+        "fpga reinit [br] [gap] [close]   Replay SPI3 config handshake + report\r\n"
         "spi3 acqread                    Read CH1/CH2 via real 0x04/0x05 protocol\r\n"
         "spi3 gowin                      Read+decode Gowin ID/USERCODE/STATUS regs\r\n"
         "spi3 scopetest [bank]           Full scope seq: USART cfg->PC0->0x04/05 read\r\n"
@@ -2004,9 +2002,6 @@ static void cmd_fpga_reinit(const char *args)
     fpga_cfg_seq_opts_t opt = {
         .upload_br = 0, .prelude_gap_ms = 100, .post_close_ms = 600, .arm_pb11 = 1,
         .reset_port = 0, .reset_pin = 0, .reset_low_ms = 10,
-        .prelude_frame_mode = 0, .pre_upload_gap_ms = 0, .cmd_br = 0,
-        .strap_pd2 = 0, .strap_pd1213 = 0, .trailing_clocks = 0,
-        .probe_edit = 0, .reload_3c = 0,
     };
     char buf[80];
     if (args && *args) {
@@ -2016,61 +2011,23 @@ static void cmd_fpga_reinit(const char *args)
         char *t0 = strtok_r(buf, " \t", &save);
         char *t1 = t0 ? strtok_r(NULL, " \t", &save) : NULL;
         char *t2 = t1 ? strtok_r(NULL, " \t", &save) : NULL;
+        char *t3 = t2 ? strtok_r(NULL, " \t", &save) : NULL;  /* reset pin spec, e.g. b9 */
         if (t0) opt.upload_br      = (uint32_t)strtoul(t0, NULL, 0);
         if (t1) opt.prelude_gap_ms = (uint32_t)strtoul(t1, NULL, 0);
         if (t2) opt.post_close_ms  = (uint32_t)strtoul(t2, NULL, 0);
-        /* Remaining tokens are optional, order-independent, prefix-classified:
-         *   a..e<pin> = FPGA reset pulse pin (e.g. b9)
-         *   f<0|1|2>  = prelude frame mode (split/combined/merge)
-         *   u<ms>     = pre-upload digest gap after CONFIG_ENABLE */
-        for (char *tk = strtok_r(NULL, " \t", &save); tk;
-             tk = strtok_r(NULL, " \t", &save)) {
-            if (tk[0] >= 'a' && tk[0] <= 'e' && tk[1]) {   /* <port><pin> */
-                opt.reset_port = (uint8_t)(tk[0] - 'a' + 1);
-                opt.reset_pin  = (uint8_t)strtoul(tk + 1, NULL, 10);
-            } else if (tk[0] == 'f') {
-                opt.prelude_frame_mode = (uint8_t)strtoul(tk + 1, NULL, 10);
-            } else if (tk[0] == 'u') {
-                opt.pre_upload_gap_ms = (uint32_t)strtoul(tk + 1, NULL, 0);
-            } else if (tk[0] == 'k') {  /* 'k' (clock) — NOT 'c', which collides
-                                         * with reset-port c (a..e) above */
-                opt.cmd_br = (uint32_t)strtoul(tk + 1, NULL, 0);
-            } else if (tk[0] == 's') {  /* strap-hold: s2[h|l]=PD2, sd[h|l]=PD12+13
-                                         * (default HIGH = stock). GPIO-audit lead. */
-                uint8_t lvl = (tk[2] == 'l') ? 2 : 1;
-                if (tk[1] == '2')      opt.strap_pd2    = lvl;
-                else if (tk[1] == 'd') opt.strap_pd1213 = lvl;
-            } else if (tk[0] == 't' && tk[1] == 'c') {  /* tc<N> = trailing clocks
-                                         * after bitstream, before 0x3A (sibling ~200) */
-                opt.trailing_clocks = (uint16_t)strtoul(tk + 2, NULL, 0);
-            } else if (tk[0] == 'p' && tk[1] == 'e') {  /* pe = probe SYSTEM_EDIT_MODE:
-                                         * read STATUS at /256 right after 0x15 */
-                opt.probe_edit = 1;
-            } else if (tk[0] == 'r' && tk[1] == 'l') {  /* rl = send 0x3C RELOAD before
-                                         * the prelude (software reconfig trigger) */
-                opt.reload_3c = 1;
-            }
+        if (t3 && t3[0] >= 'a' && t3[0] <= 'e' && t3[1]) {  /* <port><pin>: a..e + 0..15 */
+            opt.reset_port = (uint8_t)(t3[0] - 'a' + 1);
+            opt.reset_pin  = (uint8_t)strtoul(t3 + 1, NULL, 10);
         }
     }
 
-    static const char *const frame_name[] = { "split", "combined", "merge" };
-    const char *fn = opt.prelude_frame_mode < 3 ? frame_name[opt.prelude_frame_mode] : "?";
     if (opt.reset_port)
-        usb_debug_printf("reinit: br=%lu gap=%lums close=%lums frame=%s(%u) upgap=%lums cmdbr=%lu RESET=%c%u(%ums)\r\n",
+        usb_debug_printf("reinit: br=%lu gap=%lums close=%lums RESET=%c%u(%ums)\r\n",
                          opt.upload_br, opt.prelude_gap_ms, opt.post_close_ms,
-                         fn, opt.prelude_frame_mode, opt.pre_upload_gap_ms, opt.cmd_br,
                          'A' + opt.reset_port - 1, opt.reset_pin, opt.reset_low_ms);
     else
-        usb_debug_printf("reinit: br=%lu prelude_gap=%lums post_close=%lums frame=%s(%u) upgap=%lums cmdbr=%lu (no reset)\r\n",
-                         opt.upload_br, opt.prelude_gap_ms, opt.post_close_ms,
-                         fn, opt.prelude_frame_mode, opt.pre_upload_gap_ms, opt.cmd_br);
-    if (opt.strap_pd2 || opt.strap_pd1213)
-        usb_debug_printf("reinit: STRAP PD2=%s PD12/13=%s (held thru handshake)\r\n",
-                         opt.strap_pd2 == 1 ? "HIGH" : opt.strap_pd2 == 2 ? "LOW" : "-",
-                         opt.strap_pd1213 == 1 ? "HIGH" : opt.strap_pd1213 == 2 ? "LOW" : "-");
-    if (opt.trailing_clocks)
-        usb_debug_printf("reinit: trailing_clocks=%u (after bitstream, before 0x3A)\r\n",
-                         opt.trailing_clocks);
+        usb_debug_printf("reinit: br=%lu prelude_gap=%lums post_close=%lums (no reset)\r\n",
+                         opt.upload_br, opt.prelude_gap_ms, opt.post_close_ms);
 
     uint8_t close = fpga_spi3_config_sequence(&opt);
 
@@ -2078,54 +2035,6 @@ static void cmd_fpga_reinit(const char *args)
     usb_debug_printf("0x03 status: %02X %02X %02X %02X (stock 00 01 42 2E)\r\n",
                      fpga.scope_status[0], fpga.scope_status[1],
                      fpga.scope_status[2], fpga.scope_status[3]);
-
-    /* Gowin STATUS_REGISTER (0x41) — the authoritative config status. Decode the
-     * named bits so one reinit run tells us WHICH side of the wall we're on:
-     *   all-FF  -> FPGA not driving MISO (never entered config-receive)
-     *   CRC/IDV -> bytes reached the config engine (wire/content problem)
-     *   DONE    -> config actually took. */
-    uint32_t sr = ((uint32_t)fpga.cfg_status_reg[0] << 24) |
-                  ((uint32_t)fpga.cfg_status_reg[1] << 16) |
-                  ((uint32_t)fpga.cfg_status_reg[2] << 8) |
-                  (uint32_t)fpga.cfg_status_reg[3];
-    usb_debug_printf("0x41 STATUS: %02X %02X %02X %02X (raw=%08lX)\r\n",
-                     fpga.cfg_status_reg[0], fpga.cfg_status_reg[1],
-                     fpga.cfg_status_reg[2], fpga.cfg_status_reg[3], sr);
-    if (sr == 0xFFFFFFFFu || sr == 0x00000000u) {
-        usb_debug_printf("  -> %s (no valid status; FPGA not in SSPI config-receive)\r\n",
-                         sr == 0xFFFFFFFFu ? "all-FF" : "all-00");
-    } else {
-        usb_debug_printf("  flags:%s%s%s%s%s%s%s\r\n",
-                         (sr & (1u << 0))  ? " CRC_ERR"   : "",
-                         (sr & (1u << 1))  ? " BAD_CMD"   : "",
-                         (sr & (1u << 2))  ? " ID_FAIL"   : "",
-                         (sr & (1u << 12)) ? " GWVLD"     : "",
-                         (sr & (1u << 13)) ? " DONE"      : "",
-                         (sr & (1u << 15)) ? " READY"     : "",
-                         (sr & (1u << 16)) ? " POR"       : "");
-    }
-    /* Post-CONFIG_ENABLE STATUS (probe_edit): did 0x15 engage SYSTEM_EDIT_MODE
-     * (bit7)? Read at /256 right after 0x15, before the bitstream — the precise
-     * wall test (openFPGALoader's enableCfg() polls exactly this bit). */
-    if (opt.reload_3c)
-        usb_send_str("reinit: sent 0x3C RELOAD before prelude\r\n");
-    if (opt.probe_edit) {
-        uint32_t es = ((uint32_t)fpga.edit_mode_status[0] << 24) |
-                      ((uint32_t)fpga.edit_mode_status[1] << 16) |
-                      ((uint32_t)fpga.edit_mode_status[2] << 8) |
-                      (uint32_t)fpga.edit_mode_status[3];
-        usb_debug_printf("post-0x15 STATUS@/256: %02X %02X %02X %02X (raw=%08lX)\r\n",
-                         fpga.edit_mode_status[0], fpga.edit_mode_status[1],
-                         fpga.edit_mode_status[2], fpga.edit_mode_status[3], es);
-        usb_debug_printf("  EDIT_MODE(bit7)=%s  flags:%s%s%s%s%s%s\r\n",
-                         (es & (1u << 7))  ? "YES (config-receive engaged!)" : "no (0x15 did NOT engage)",
-                         (es & (1u << 0))  ? " CRC_ERR" : "",
-                         (es & (1u << 2))  ? " ID_FAIL" : "",
-                         (es & (1u << 12)) ? " GWVLD"   : "",
-                         (es & (1u << 13)) ? " DONE"    : "",
-                         (es & (1u << 15)) ? " READY"   : "",
-                         (es & (1u << 17)) ? " FLASH_LOCK" : "");
-    }
     usb_send_str("--- acqread after reinit ---\r\n");
     cmd_spi3_acqread_one(0x04);
     cmd_spi3_acqread_one(0x05);

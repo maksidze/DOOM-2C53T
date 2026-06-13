@@ -2,8 +2,18 @@
 # Target: Artery AT32F403A (ARM Cortex-M4F @ 240MHz)
 
 ######################################################################
-# Toolchain
+# Toolchain & OS detection
 ######################################################################
+# Detect operating system
+ifeq ($(OS),Windows_NT)
+  PYTHON ?= python
+else
+  PYTHON ?= python3
+endif
+
+RM = $(PYTHON) -c "import shutil, sys; shutil.rmtree(sys.argv[1], ignore_errors=True)"
+MKDIR = $(PYTHON) -c "import os, sys; os.makedirs(sys.argv[1], exist_ok=True)"
+
 PREFIX  = arm-none-eabi-
 CC      = $(PREFIX)gcc
 AS      = $(PREFIX)gcc -x assembler-with-cpp
@@ -24,82 +34,27 @@ FREERTOS   = FreeRTOS
 # Source files
 ######################################################################
 
-# Feature flags (FFT enabled by default)
-FEATURES ?= FFT
 
 # Application
 C_SOURCES  = src/main.c
 C_SOURCES += src/drivers/lcd.c
-C_SOURCES += src/ui/status_bar.c
-C_SOURCES += src/ui/scope_ui.c
-C_SOURCES += src/ui/meter_ui.c
-C_SOURCES += src/ui/siggen_ui.c
-C_SOURCES += src/ui/settings_ui.c
-C_SOURCES += src/ui/component_ui.c
-C_SOURCES += src/ui/resistor_calc_ui.c
-C_SOURCES += src/ui/bode_ui.c
-C_SOURCES += src/ui/fuse_ui.c
-C_SOURCES += src/ui/scope_state.c
-C_SOURCES += src/tasks/input_handler.c
-C_SOURCES += src/tasks/measurement.c
 C_SOURCES += src/drivers/flash_fs.c
-C_SOURCES += src/drivers/esp_comm.c
+C_SOURCES += src/drivers/virtual_disk.c
+C_SOURCES += src/drivers/usb_msc.c
 C_SOURCES += src/drivers/watchdog.c
 C_SOURCES += src/drivers/button_scan.c
 C_SOURCES += src/drivers/dfu_boot.c
 C_SOURCES += src/drivers/battery.c
-C_SOURCES += src/drivers/fpga.c
-C_SOURCES += src/drivers/fpga_scanner.c
 C_SOURCES += src/drivers/dac_output.c
-C_SOURCES += src/drivers/meter_data.c
-C_SOURCES += src/drivers/usb_debug.c
-C_SOURCES += src/dsp/signal_gen.c
-C_SOURCES += src/dsp/shared_mem.c
-C_SOURCES += src/ui/persistence.c
-C_SOURCES += src/ui/theme.c
-C_SOURCES += src/ui/xy_mode.c
-C_SOURCES += src/ui/roll_mode.c
-C_SOURCES += src/ui/trend_plot.c
-C_SOURCES += src/dsp/math_channel.c
-C_SOURCES += src/dsp/bode.c
-C_SOURCES += src/tasks/component_test.c
-C_SOURCES += src/tasks/mask_test.c
-C_SOURCES += src/util/config.c
-C_SOURCES += src/util/screenshot.c
-C_SOURCES += src/decode/decode_uart.c
-C_SOURCES += src/decode/decode_i2c.c
-C_SOURCES += src/decode/decode_spi.c
-C_SOURCES += src/decode/decode_can.c
-C_SOURCES += src/decode/decode_kline.c
-C_SOURCES += src/modules/compression_test.c
-C_SOURCES += src/modules/alternator_test.c
 C_SOURCES += src/fonts/font.c
 C_SOURCES += src/fonts/font_small.c
 C_SOURCES += src/fonts/font_medium.c
 C_SOURCES += src/fonts/font_large.c
 C_SOURCES += src/fonts/font_xlarge.c
 
-# FFT / DSP module
-ifneq ($(findstring FFT,$(FEATURES)),)
-  C_SOURCES += src/dsp/fft.c
-  C_SOURCES += src/dsp/fft_test_signals.c
-  FFT_DEFS = -DFEATURE_FFT
-  # CMSIS-DSP (optional optimization — auto-detected)
-  CMSIS_DSP = CMSIS-DSP
-  ifneq ($(wildcard $(CMSIS_DSP)/Include/arm_math.h),)
-    C_SOURCES += $(CMSIS_DSP)/Source/TransformFunctions/arm_rfft_fast_f32.c
-    C_SOURCES += $(CMSIS_DSP)/Source/TransformFunctions/arm_rfft_fast_init_f32.c
-    C_SOURCES += $(CMSIS_DSP)/Source/TransformFunctions/arm_cfft_f32.c
-    C_SOURCES += $(CMSIS_DSP)/Source/TransformFunctions/arm_cfft_init_f32.c
-    C_SOURCES += $(CMSIS_DSP)/Source/CommonTables/arm_common_tables.c
-    C_SOURCES += $(CMSIS_DSP)/Source/CommonTables/arm_const_structs.c
-    C_SOURCES += $(CMSIS_DSP)/Source/TransformFunctions/arm_cfft_radix8_f32.c
-    C_SOURCES += $(CMSIS_DSP)/Source/ComplexMathFunctions/arm_cmplx_mag_f32.c
-    C_SOURCES += $(CMSIS_DSP)/Source/BasicMathFunctions/arm_scale_f32.c
-    FFT_INCLUDES = -I$(CMSIS_DSP)/Include
-    FFT_DEFS += -DUSE_CMSIS_DSP -DARM_MATH_CM4 -D__FPU_PRESENT=1
-  endif
-endif
+# DOOM Engine
+DOOM_SRCS = $(wildcard src/doom/source/*.c)
+C_SOURCES += $(DOOM_SRCS)
 
 # AT32 CMSIS + clock config
 C_SOURCES += $(AT32_CMSIS)/device_support/system_at32f403a_407.c
@@ -114,8 +69,10 @@ C_SOURCES += $(AT32_DRV)/src/at32f403a_407_xmc.c
 C_SOURCES += $(AT32_DRV)/src/at32f403a_407_wdt.c
 C_SOURCES += $(AT32_DRV)/src/at32f403a_407_adc.c
 C_SOURCES += $(AT32_DRV)/src/at32f403a_407_dac.c
+C_SOURCES += $(AT32_DRV)/src/at32f403a_407_dma.c
 C_SOURCES += $(AT32_DRV)/src/at32f403a_407_tmr.c
 C_SOURCES += $(AT32_DRV)/src/at32f403a_407_usb.c
+C_SOURCES += $(AT32_DRV)/src/at32f403a_407_usart.c
 C_SOURCES += $(AT32_DRV)/src/at32f403a_407_acc.c
 
 # USB Device Middleware (CDC virtual COM port)
@@ -126,6 +83,12 @@ C_SOURCES += $(AT32_USBD)/src/usbd_int.c
 C_SOURCES += $(AT32_USBD)/src/usbd_sdr.c
 C_SOURCES += $(AT32_CDC)/cdc_class.c
 C_SOURCES += $(AT32_CDC)/cdc_desc.c
+
+# USB Mass Storage class
+AT32_MSC  = at32f403a_lib/middlewares/usbd_class/msc
+C_SOURCES += $(AT32_MSC)/msc_class.c
+C_SOURCES += $(AT32_MSC)/msc_desc.c
+C_SOURCES += $(AT32_MSC)/msc_bot_scsi.c
 
 # FreeRTOS kernel
 C_SOURCES += $(FREERTOS)/tasks.c
@@ -148,13 +111,8 @@ endif
 ######################################################################
 C_INCLUDES  = -Iinclude
 C_INCLUDES += -Isrc/drivers
-C_INCLUDES += -Isrc/dsp
-C_INCLUDES += -Isrc/ui
-C_INCLUDES += -Isrc/tasks
-C_INCLUDES += -Isrc/util
-C_INCLUDES += -Isrc/decode
-C_INCLUDES += -Isrc/modules
 C_INCLUDES += -Isrc/fonts
+C_INCLUDES += -Isrc/doom/include
 C_INCLUDES += -Isrc
 C_INCLUDES += -I$(AT32_DRV)/inc
 C_INCLUDES += -I$(AT32_CMSIS)/device_support
@@ -163,6 +121,7 @@ C_INCLUDES += -I$(FREERTOS)/include
 C_INCLUDES += -I$(FREERTOS)/portable/GCC/ARM_CM4F
 C_INCLUDES += -I$(AT32_USBD)/inc
 C_INCLUDES += -I$(AT32_CDC)
+C_INCLUDES += -I$(AT32_MSC)
 
 ######################################################################
 # Compiler flags
@@ -176,9 +135,6 @@ MCU = $(CPU) -mthumb $(FPU) $(FLOAT-ABI)
 
 # C defines
 C_DEFS  = -DAT32F403AVGT7
-C_DEFS += -DSCOPE_DEBUG_OVERLAY
-C_DEFS += $(FFT_DEFS)
-C_INCLUDES += $(FFT_INCLUDES)
 
 # Compiler flags
 CFLAGS  = $(MCU) $(C_DEFS) $(C_INCLUDES)
@@ -234,7 +190,7 @@ $(BUILD_DIR)/$(TARGET).elf: $(OBJECTS) Makefile $(LDSCRIPT)
 
 $(BUILD_DIR)/$(TARGET).bin: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/option_bytes48.bin
 	$(CP) -O binary $< $@
-	@echo "Built: $@ ($$(wc -c < $@ | tr -d ' ') bytes)"
+	@$(PYTHON) -c "import os; print('Built: $@ (' + str(os.path.getsize('$@')) + ' bytes)')"
 
 # One-shot option-byte blob for first-time DFU setup.
 # Writes the AT32F403A User System Data region at 0x1FFFF800 so EOPB0 = 0xFE,
@@ -261,20 +217,20 @@ $(BUILD_DIR)/$(TARGET).bin: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/option_bytes
 #
 # Flashed via: dfu-util -a 1 -d 2e3c:df11 -s 0x1FFFF800 -D build/option_bytes48.bin
 $(BUILD_DIR)/option_bytes48.bin: Makefile | $(BUILD_DIR)
-	@printf '\xA5\x5A\xFF\x00\xFF\x00\xFF\x00\xFF\x00\xFF\x00\xFF\x00\xFF\x00\xFE\x01\xFF\x00\xFF\x00\xFF\x00\xFF\x00\xFF\x00\xFF\x00\xFF\x00\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF' > $@
-	@echo "Built: $@ ($$(wc -c < $@ | tr -d ' ') bytes) — EOPB0=0xFE, 224KB SRAM"
+	$(PYTHON) -c "open('$@', 'wb').write(bytes.fromhex('a55aff00ff00ff00ff00ff00ff00ff00fe01ff00ff00ff00ff00ff00ff00ff00ffffffffffffffffffffffffffffffff'))"
+	@$(PYTHON) -c "import os; print('Built: $@ (' + str(os.path.getsize('$@')) + ' bytes) — EOPB0=0xFE, 224KB SRAM')"
 
 $(BUILD_DIR)/$(TARGET).hex: $(BUILD_DIR)/$(TARGET).elf
 	$(CP) -O ihex $< $@
 
 $(BUILD_DIR):
-	mkdir -p $@
+	$(MKDIR) $@
 
 ######################################################################
 # Utility targets
 ######################################################################
 clean:
-	rm -rf $(BUILD_DIR)
+	$(RM) $(BUILD_DIR)
 
 disasm: $(BUILD_DIR)/$(TARGET).elf
 	$(OBJDUMP) -d -S $< > $(BUILD_DIR)/$(TARGET).dis
@@ -298,25 +254,6 @@ emu: clean all
 guest: CFLAGS += -DGUEST_BUILD
 guest: LDSCRIPT = ld/at32f403a_guest.ld
 guest: clean all
-
-# Warm-handoff experiment build (guest image). fpga_init() comes up read-only
-# against a FPGA already scope-configured by stock — skips the SSPI config
-# sequence, boot/meter USART, frontend relays, and auto-tasks. Read with the
-# `spi3 acqread` shell command. See fpga.c FPGA_WARM_HANDOFF_TEST and
-# docs/fpga_warm_handoff_test.md.
-guest-warmtest: CFLAGS += -DGUEST_BUILD -DFPGA_WARM_HANDOFF_TEST=1
-guest-warmtest: LDSCRIPT = ld/at32f403a_guest.ld
-guest-warmtest: clean all
-
-# USART-silent scope-boot experiment (guest image). Holds USART2 UEN CLEAR through
-# the whole boot, skips Step 3b + Step 8 USART traffic, creates no dvom/meter/acq
-# auto-tasks — so the SPI3 wire stays quiet and `fpga reinit`/`spi3 xfer` run
-# unperturbed. Tests the stock-bringup-diff hypothesis that live USART2 keeps the
-# FPGA's NV design owning the SSPI pins. See fpga.c FPGA_USART_SILENT_SCOPE and
-# docs/fpga_stock_bringup_diff_plan.md.
-guest-usart-silent: CFLAGS += -DGUEST_BUILD -DFPGA_USART_SILENT_SCOPE=1
-guest-usart-silent: LDSCRIPT = ld/at32f403a_guest.ld
-guest-usart-silent: clean all
 
 # Flash app via USB HID bootloader (bootloader must be running)
 flash: $(BUILD_DIR)/$(TARGET).bin
@@ -363,4 +300,4 @@ soak-test: emu
 soak-quick: emu
 	python3 ../scripts/soak_test.py --no-build --duration 30 --seed $(SOAK_SEED) --verbose
 
-.PHONY: all clean disasm size renode soak-test soak-quick flash flash-dfu bootloader flash-bootloader flash-all guest guest-warmtest guest-usart-silent emu
+.PHONY: all clean disasm size renode soak-test soak-quick flash flash-dfu bootloader flash-bootloader flash-all guest emu
