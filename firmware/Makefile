@@ -308,6 +308,16 @@ guest-warmtest: CFLAGS += -DGUEST_BUILD -DFPGA_WARM_HANDOFF_TEST=1
 guest-warmtest: LDSCRIPT = ld/at32f403a_guest.ld
 guest-warmtest: clean all
 
+# USART-silent scope-boot experiment (guest image). Holds USART2 UEN CLEAR through
+# the whole boot, skips Step 3b + Step 8 USART traffic, creates no dvom/meter/acq
+# auto-tasks — so the SPI3 wire stays quiet and `fpga reinit`/`spi3 xfer` run
+# unperturbed. Tests the stock-bringup-diff hypothesis that live USART2 keeps the
+# FPGA's NV design owning the SSPI pins. See fpga.c FPGA_USART_SILENT_SCOPE and
+# docs/fpga_stock_bringup_diff_plan.md.
+guest-usart-silent: CFLAGS += -DGUEST_BUILD -DFPGA_USART_SILENT_SCOPE=1
+guest-usart-silent: LDSCRIPT = ld/at32f403a_guest.ld
+guest-usart-silent: clean all
+
 # Flash app via USB HID bootloader (bootloader must be running)
 flash: $(BUILD_DIR)/$(TARGET).bin
 	uv run ../scripts/hid_flash.py $<
@@ -353,4 +363,4 @@ soak-test: emu
 soak-quick: emu
 	python3 ../scripts/soak_test.py --no-build --duration 30 --seed $(SOAK_SEED) --verbose
 
-.PHONY: all clean disasm size renode soak-test soak-quick flash flash-dfu bootloader flash-bootloader flash-all guest guest-warmtest emu
+.PHONY: all clean disasm size renode soak-test soak-quick flash flash-dfu bootloader flash-bootloader flash-all guest guest-warmtest guest-usart-silent emu

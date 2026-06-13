@@ -289,6 +289,19 @@ static void spi3_pump(const uint8_t *tx, volatile uint8_t *rx, uint32_t n)
 #define FPGA_WARM_HANDOFF_TEST  0
 #endif
 
+/* USART-silent scope-boot experiment (2026-06-13, stock-bringup-diff finding).
+ * Stock holds USART2 UEN CLEAR through the entire scope boot and never runs the
+ * dvom/meter tasks before the SPI3 config; our firmware enables USART2 + runs
+ * dvom_TX/dvom_RX/meter_poll, which is the leading suspect for keeping the FPGA's
+ * NV design owning the SSPI pins (prelude MISO 0x80 user-mode vs stock 0xFF
+ * config-wait). When set: USART2 UEN never asserted, NVIC off, Step 3b + Step 8
+ * USART traffic skipped, and NO auto-tasks created — the SPI3 wire stays quiet so
+ * `fpga reinit` / `spi3 xfer` run unperturbed. Watch first 0x05 prelude MISO for
+ * 0x80->0xFF and `0x11` IDCODE for 01 20 68 1B. See docs/fpga_stock_bringup_diff_plan.md. */
+#ifndef FPGA_USART_SILENT_SCOPE
+#define FPGA_USART_SILENT_SCOPE  0
+#endif
+
 static void spi3_set_br(uint32_t br)
 {
     FPGA_SPI->ctrl1 &= ~(1u << 6);              /* SPE = 0 */
@@ -1538,6 +1551,20 @@ uint8_t fpga_spi3_config_sequence(const fpga_cfg_seq_opts_t *opt)
      * function exit. */
     spi3_set_br(opt->cmd_br);
 
+    /* [0a] DIAGNOSTIC (reload_3c): Gowin SSPI RELOAD (0x3C) — software reconfig
+     * trigger, sent at /256 in its own CS frame before the prelude, with a settle
+     * delay. Tests whether it knocks the running NV design back toward config
+     * (clears GWVLD/FLASH_LOCK so CONFIG_ENABLE can engage SYSTEM_EDIT_MODE). */
+    if (opt->reload_3c) {
+        spi3_set_br(7);                  /* /256 */
+        SPI3_CS_ASSERT();
+        spi3_xfer(0x3C);
+        spi3_xfer(0x00);
+        SPI3_CS_DEASSERT();
+        spi3_set_br(opt->cmd_br);
+        fpga_scope_delay_ms(50);
+    }
+
     /* [0] bare CS pulse — CS low→high with ZERO clocks (stock t=3.6082).
      * A CS assertion is the SSPI frame-sync that resets the command FSM. */
     SPI3_CS_DEASSERT();
@@ -1584,6 +1611,22 @@ uint8_t fpga_spi3_config_sequence(const fpga_cfg_seq_opts_t *opt)
         if (opt->prelude_frame_mode != 2) SPI3_CS_DEASSERT();
     }
 
+    /* [3b] DIAGNOSTIC (probe_edit): read STATUS(0x41) at /256 IMMEDIATELY after
+     * CONFIG_ENABLE — does 0x15 engage SYSTEM_EDIT_MODE (bit7)? Reads are only
+     * valid at slow clock. Skipped in merge mode (CS held LOW into the upload).
+     * Default off so the real attempt stays byte-unchanged. */
+    if (opt->probe_edit && opt->prelude_frame_mode != 2) {
+        spi3_set_br(7);                  /* /256 — valid SSPI read clock */
+        spi3_xfer(0x00);                 /* bare clock, CS HIGH (frame) */
+        SPI3_CS_ASSERT();
+        spi3_xfer(0x41);
+        spi3_xfer(0x00); spi3_xfer(0x00); spi3_xfer(0x00);
+        for (unsigned i = 0; i < 4; i++)
+            fpga.edit_mode_status[i] = spi3_xfer(0x00);
+        SPI3_CS_DEASSERT();
+        spi3_set_br(opt->cmd_br);        /* restore command clock */
+    }
+
     /* Optional digest gap between CONFIG_ENABLE and the data stream (stock ~8µs
      * → default 0). Skipped in merge mode, where CS stays LOW into the upload. */
     if (opt->prelude_frame_mode != 2)
@@ -1596,6 +1639,12 @@ uint8_t fpga_spi3_config_sequence(const fpga_cfg_seq_opts_t *opt)
     spi3_set_br(opt->upload_br);
     spi3_pump(fpga_h2_cal_table, NULL, FPGA_H2_CAL_TABLE_SIZE);
     spi3_set_br(opt->cmd_br);            /* back to command clock for close/status */
+    /* Trailing clocks: Gowin runs the CRC-check / DONE / wakeup on CCLK cycles
+     * AFTER the last config byte. Our sequence sent none; rosenrot00's working
+     * 2C23T SPI loader clocks ~200 dummy 0x00 here. Stay inside the upload CS
+     * frame. Default 0 = stock-faithful; sweep via `fpga reinit tcN`. */
+    for (uint32_t i = 0; i < opt->trailing_clocks; i++)
+        spi3_xfer(0x00);
     SPI3_CS_DEASSERT();
     fpga.h2_bytes_sent = FPGA_H2_CAL_TABLE_SIZE;
     fpga.h2_upload_done = 1;
@@ -1609,6 +1658,21 @@ uint8_t fpga_spi3_config_sequence(const fpga_cfg_seq_opts_t *opt)
     /* [6] single 0x00 byte, CS LOW (stock flush frame at t=4.4484). */
     SPI3_CS_ASSERT();
     spi3_xfer(0x00);
+    SPI3_CS_DEASSERT();
+
+    /* [6b] Gowin STATUS_REGISTER read (opcode 0x41) — the authoritative config
+     * status, which our sequence never read. Framed like rosenrot00's working
+     * read_register32(0x41000000): a bare dummy byte (CS HIGH), then CS LOW,
+     * opcode 0x41 + 3 pad bytes, then clock 4 bytes back. Decoded by the shell.
+     * All-0xFF = FPGA not driving MISO (never entered config-receive) → config-
+     * entry wall; CRC_ERROR/ID_VERIFY_FAILED set = bytes reached the engine →
+     * wire/content problem. See sibling_loader_config_diff.md. */
+    spi3_xfer(0x00);                          /* bare clock, CS HIGH (frame) */
+    SPI3_CS_ASSERT();
+    spi3_xfer(0x41);
+    spi3_xfer(0x00); spi3_xfer(0x00); spi3_xfer(0x00);
+    for (unsigned i = 0; i < 4; i++)
+        fpga.cfg_status_reg[i] = spi3_xfer(0x00);
     SPI3_CS_DEASSERT();
 
     /* Step 7c: post-upload scope config (5 register writes + status read). */
@@ -1745,6 +1809,11 @@ void fpga_init(void)
     /* USART2 config: 9600 baud, 8N1 */
     USART2->baudr = system_core_clock / 2 / FPGA_USART_BAUD;  /* APB1 = HCLK/2 */
     USART2->ctrl1 = 0;
+#if FPGA_USART_SILENT_SCOPE
+    /* Experiment: leave USART2 fully DISABLED (UEN clear) like stock's scope boot.
+     * No RE/TE/RDBFIEN/UEN, no NVIC — zero USART2 traffic on PA2/PA3. */
+    (void)0;
+#else
     USART2->ctrl1 |= (1 << 2);   /* RE: Receiver enable */
     USART2->ctrl1 |= (1 << 3);   /* TE: Transmitter enable */
     USART2->ctrl1 |= (1 << 5);   /* RDBFIEN: RX interrupt enable */
@@ -1753,6 +1822,7 @@ void fpga_init(void)
     /* Enable USART2 interrupt in NVIC */
     NVIC_EnableIRQ(USART2_IRQn);
     NVIC_SetPriority(USART2_IRQn, 5);  /* Below FreeRTOS max syscall priority */
+#endif
 
     /* ---------------------------------------------------------------
      * Step 3: Wait for FPGA to finish booting
@@ -1788,7 +1858,7 @@ void fpga_init(void)
      * unarmed; the prior after-upload order came from the debunked
      * FUN_08027a50 reading (see docs/fpga_bitstream_replay_plan.md).
      * --------------------------------------------------------------- */
-#if !FPGA_WARM_HANDOFF_TEST
+#if !FPGA_WARM_HANDOFF_TEST && !FPGA_USART_SILENT_SCOPE
     usart2_send_cmd(0x00, FPGA_CMD_INIT_01);  /* 0x01: Channel init */
     systick_delay_ms(50);
     usart2_send_cmd(0x00, FPGA_CMD_INIT_02);  /* 0x02: Signal gen setup */
@@ -1799,7 +1869,7 @@ void fpga_init(void)
     systick_delay_ms(50);
     usart2_send_cmd(0x00, FPGA_CMD_INIT_08);  /* 0x08: Meter configure */
     systick_delay_ms(100);
-#endif  /* !FPGA_WARM_HANDOFF_TEST — skip: would disturb stock-loaded config */
+#endif  /* skip: would disturb stock-loaded config / perturb config-entry */
 
     /* ---------------------------------------------------------------
      * Step 4: SPI3 peripheral init — Mode 3, Master, /2 prescaler
@@ -2061,6 +2131,7 @@ void fpga_init(void)
     /* Meter activation: cmd_hi=0x05 routes to meter IC subsystem!
      * Stock firmware TX queue items: 0x0508, 0x0509, 0x0507, 0x0514.
      * This was discovered by tracing direct TX queue writes in the binary. */
+#if !FPGA_USART_SILENT_SCOPE
     usart2_send_cmd(0x05, 0x08);  /* Meter: configure */
     systick_delay_ms(10);
     usart2_send_cmd(0x05, 0x09);  /* Meter: start measurement */
@@ -2101,6 +2172,7 @@ void fpga_init(void)
     systick_delay_ms(10);
     usart2_send_cmd(0x00, FPGA_CMD_COUPLING);    /* 0x1E: coupling/BW */
     systick_delay_ms(50);
+#endif  /* !FPGA_USART_SILENT_SCOPE — keep the wire quiet for the config test */
 
     /* Step 9b removed: PB11 is now armed immediately before the SPI3
      * handshake (stock-captured order, issue-#18 capture). */
@@ -2148,6 +2220,12 @@ QueueHandle_t fpga_create_tasks(void)
      * old 0x80|range read and would both disturb the FPGA and compete with the
      * manual `spi3 acqread` probe; the meter poll/USART tasks could switch the
      * FPGA out of scope mode. We drive everything from the debug shell. */
+    (void)tx_task_handle; (void)rx_task_handle; (void)acq_task_handle;
+#elif FPGA_USART_SILENT_SCOPE
+    /* USART-silent scope test: create NO USART/meter tasks (dvom_TX/dvom_RX/
+     * meter_poll) — they are the ongoing PA2/PA3 traffic we're eliminating — and
+     * no acquisition task (it would compete on the SPI3 bus). Drive `fpga reinit`
+     * + `spi3 xfer` from the debug shell on a quiet wire. */
     (void)tx_task_handle; (void)rx_task_handle; (void)acq_task_handle;
 #else
     /* Create tasks (stack sizes and priorities match stock firmware) */

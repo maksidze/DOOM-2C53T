@@ -199,6 +199,20 @@ typedef struct {
     volatile uint8_t  h2_close_status;     /* MISO byte after 0x3A close (stock: 0xF8) */
     volatile uint8_t  scope_status[4];     /* MISO from post-upload 0x03 read
                                             * (stock boot: 00 01 42 2E — issue-#18 capture) */
+    volatile uint8_t  cfg_status_reg[4];   /* Gowin STATUS_REGISTER (opcode 0x41),
+                                            * big-endian as clocked. The authoritative
+                                            * config status. Bits (openFPGALoader
+                                            * gowin.cpp): 0=CRC_ERROR 1=BAD_COMMAND
+                                            * 2=ID_VERIFY_FAILED 13=DONE_FINAL 15=READY
+                                            * 16=POR. All-0xFF = FPGA not driving MISO
+                                            * (never entered config-receive). Separates
+                                            * wire-problem from config-entry problem.
+                                            * See sibling_loader_config_diff.md. */
+    volatile uint8_t  edit_mode_status[4]; /* STATUS (0x41) read at /256 IMMEDIATELY
+                                            * after 0x15 CONFIG_ENABLE (probe_edit knob).
+                                            * bit7 = SYSTEM_EDIT_MODE — if clear here,
+                                            * CONFIG_ENABLE never engaged config-receive
+                                            * (the precise wall). Only valid at slow clk. */
 
     /* Experimental stock runtime shadow for scope-mode bench work.
      * These are NOT the original firmware RAM locations. They are a small
@@ -255,6 +269,19 @@ typedef struct {
      * the meter_state channel loop. See unmapped_mcu_fpga_pin_candidates.md §4a. */
     uint8_t  strap_pd2;       /* PD2:       0=untouched, 1=hold HIGH, 2=hold LOW */
     uint8_t  strap_pd1213;    /* PD12+PD13: 0=untouched, 1=hold HIGH, 2=hold LOW */
+    /* Trailing clocks after the last bitstream byte, before 0x3A close. Gowin
+     * runs the CRC-check / DONE / wakeup on CCLK cycles AFTER the final config
+     * byte; our sequence sent ZERO. rosenrot00's working 2C23T SPI loader clocks
+     * ~200 dummy 0x00 here (fpga.c:342-344). Sweepable: 0 (stock-faithful per the
+     * capture) / 64 / 200 / 512. See sibling_loader_config_diff.md. */
+    uint16_t trailing_clocks;
+    /* DIAGNOSTIC knobs (default 0 = sequence byte-unchanged). */
+    uint8_t  probe_edit;      /* 1 = after 0x15 CONFIG_ENABLE, read STATUS(0x41) at
+                               *     /256 into fpga.edit_mode_status[] — does bit7
+                               *     SYSTEM_EDIT_MODE engage? (the precise wall test) */
+    uint8_t  reload_3c;       /* 1 = send Gowin RELOAD (0x3C) at /256 before the
+                               *     prelude — software reconfig trigger; does it
+                               *     clear GWVLD/FLASH_LOCK and let CONFIG_ENABLE land? */
 } fpga_cfg_seq_opts_t;
 
 /* Run the full SPI3 config handshake. Returns the 0x3A close status byte
