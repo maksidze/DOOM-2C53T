@@ -304,3 +304,142 @@ hardware: (1) capture our own SPI3 wire vs stock (fine soldering — shelved);
 (2) load the scope bitstream directly via the FPGA programming header (M0-M3/
 VPP) with an external Gowin programmer / openFPGALoader, bypassing the MCU SSPI
 entirely — then our (now-correct) 0x04/0x05 read path should yield a trace.
+
+### Experiment 7: pre-upload UART decode — STOCK SENDS NO USART COMMANDS AT BOOT (2026-06-12)
+
+The "exhausted" call above missed one lead: the capture's PA3 (FPGA→MCU) line
+covers the whole pre-upload window, and the FPGA acks every command it receives
+with a 10-byte `AA 55` echo frame — so PA3 is a one-way mirror of stock's
+(uncaptured) PA2 TX. Bit-level decode (`decode_uart.py`, 9600 8N1):
+
+```
+PA3_RX: 64 bytes
+  1.406849: 00                                  (line-alive blip)
+  2.772239: 5a a5 e4 2e 63 49 10 00 00 00       unsolicited data frame
+  2.936622: 5a 69 9e 69 95 07 00 00 00 00 00    unsolicited status frame
+  3.099939: 5a a5 e4 2e ac d2 10 00 00 01 01
+  3.263424: 5a 69 9e 69 95 07 00 00 01 01
+  3.429576: 5a 69 9e 69 95 07 00 00 01 c0
+  3.592918: 5a 69 9e 69 95 07 00 00 01 01
+  (nothing further until capture end at 10.5s)
+PA4_TX: dead — rises to idle-high at 1.383s, zero data ever (confirms mislabel)
+```
+
+**Findings:**
+1. **ZERO `AA 55` echo frames pre-upload → stock sent ZERO USART commands
+   before the 0x3B upload.** The six RX frames are unsolicited NV-design
+   traffic (~163ms cadence, alternating 5A A5 data / 5A 69 status).
+2. **No echoes through the ENTIRE 10.5s capture** — stock boots straight into
+   scope acquisition without touching USART at all. The decompile-derived
+   "Phase 4 inline USART cmds precede SPI3" ordering is disproven on the wire.
+3. PA3 stays LOW until 1.383s → the FPGA's NV design takes ~1.4s after
+   power-on to boot (our 2000ms pre-upload wait covers it).
+4. Corrects a CLAUDE.md assumption: the NV design DOES emit unsolicited frames
+   at boot (the "only responds to recent TX" behavior is steady-state).
+
+**Hypothesis (now the leading one for config-entry):** our Step 3b sent five
+boot commands (0x01/02/06/07/08) over USART BEFORE the upload. Commanding the
+NV design plausibly flips its user-design SPI slave onto the SSPI pins — which
+is exactly our MISO signature (prelude MISO driven 0x80) vs stock's config-wait
+float (0xFF). `fpga.c` changed 2026-06-12: Step 3b deleted (no USART before
+upload), boot commands moved to Step 7d AFTER the SPI3 sequence. Builds clean.
+
+**Bench litmus (cold power cycle, not `fpga reinit`):** `status` → prelude MISO
+(init_hs) should read 0xFF (float) instead of 0x80; then 0x3A close = 0xF8 and
+`0x03` status `00 01 42 2E` if config completes. NOTE: the FPGA is stateful —
+test from a full power-off boot; a warm reinit after USART traffic won't prove
+anything.
+
+### Experiments 8-13: the cold-boot stock-faithfulness campaign (2026-06-12 night, Unit 2)
+
+Six true-cold-boot rounds, each adding one stock-faithful fix. Litmus result
+each round: prelude MISO float ✓ (config-wait signature achieved and held from
+round 1) but 0x3A close = FF every time (not even stock's F8), 0x03 all-FF,
+FPGA UART silent.
+
+Fixes applied (all kept — each is independently stock-faithful):
+1. **No USART before upload** (Exp 7 finding) → prelude MISO flipped 0x80→FF.
+2. Upload timing 2.4s→4.4s after power (stock: 3.9s) — no change.
+3. **PC6 raised first-thing in main()** (stock: HIGH before capture start;
+   possible power-up strap) — no change.
+4. **SPI3 pins+peripheral configured BEFORE the boot wait** (stock idles
+   MOSI/CS/SCK HIGH from t=0; ours floated 4s) — no change.
+5. **USART2 UE deferred to post-upload** (stock keeps UE=0 through boot —
+   usart_boot_frames_exact.md), **PC11 driven LOW** (stock scope-boot),
+   **AA 55 TX frame header** restored (stock .data image) — no change.
+6. **PB11 driven LOW from boot** for a true arming LOW→HIGH edge (capture:
+   LOW from t=0, raised 1ms pre-handshake; ours had floated→pull-up HIGH,
+   so the edge never existed) + upload pinned to /64 (the only rate with a
+   recorded F8 — maksidze's capture) — no change.
+
+**Key instrumentation:** Step 5 boot wait now doubles as a passive PA3 edge
+counter (init_hs[0]/[3] = G1 bytes 1+4 in `status`). Result: **0 edges** —
+the FPGA emits NOTHING on UART during our boot window.
+
+**Control round (FPGA_BOOT_UPLOAD=0, no SPI3 contact at all): still 0 edges.**
+→ Our SPI3/upload activity was never the disturbance; the FPGA is mute before
+we start. The folklore "MISO float = config-wait" is better read as
+"nobody home": float + reject means no listener engaged, not a waiting one.
+
+**🔓 NV design unlocked live (no reflash):** with the control build running:
+`gpio set B11 1` + `gpio set C11 1` + `usart raw aa 55 00 09 00 00 00 00 00 09`
+→ **the NV meter design streams 5A A5 data frames continuously** (~5/s, 321
+frames observed). All three were required; headerless frames get ~1 byte.
+So: PB11 HIGH + PC11 HIGH + AA55-headed command = NV design fully alive under
+our firmware. (The months of "working meter" with headerless frames likely
+worked for other reasons; AA 55 is the real header — agent-verified from
+stock's compressed .data image.)
+
+**Reinterpretation of the capture's "announce frames":** stock's six
+5A A5/5A 69 frames at t=2.8-3.6s are almost certainly this same auto-stream —
+the capture device's last-active mode left the analog frontend / mux in meter
+posture, the NV design streamed into stock's deliberately-disabled UART, and
+stock ignored every byte. They are NOT a handshake and NOT a precondition.
+
+**Reinit while the design was actively streaming (closest-yet match to the
+capture's pre-upload state): REJECTED at both /2 and /64.** The user design
+keeps streaming straight through the upload — 0x3B falls on deaf ears.
+
+**State of the mystery:** every captured line, byte, rate, and edge is now
+replicated; idle FPGA ignores the upload, active FPGA ignores the upload.
+Whatever arms stock's config path is invisible to the 8 captured channels.
+Open paths: (a) full stock pre-FPGA GPIO preamble replication (extraction
+in progress → stock_pre_fpga_gpio_state.md), (b) ask maksidze for a recapture
+with PA2 instead of the dead "PA4" + a capture of OUR firmware booting,
+(c) external Gowin programmer via M0-M3/VPP header (decisive decoupler).
+
+### Experiment 14: range-5 analog-frontend bank pre-upload — NEGATIVE (2026-06-12)
+
+stock_pre_fpga_gpio_state.md decoded that stock drives its whole frontend
+relay/gain bank to range-5 (`PC12=L PE4=H PE5=H PE6=L PA15=H PA10=H PB10=H`,
++ PB9/PA6 HIGH) BEFORE the 0x3B open, via gpio_mux_portc_porte(5) +
+gpio_mux_porta_portb(5); our upload path left all of it floating. Added Step
+2c to drive the exact range-5 posture before the autoboot wait. Cold-boot
+result on Unit 2: **no change** — 0x3A close still FF, 0x03 still all-FF, and
+the PA3 edge counter still **0** (FPGA emits no announce frames). The floating
+frontend was not a config-time strap.
+
+### The genuine wall + the sharpest unresolved anomaly
+
+Every MCU-side variable derivable from the #18 capture is now matched and
+tested negative (USART silence, PC6/PB11/PC11/SPI idle levels, UE timing,
+AA55 header, /64 rate, wire-exact CS framing, range-5 frontend). The control
+build proved the FPGA is mute even when we never touch SPI3.
+
+**The unexplained core:** under STOCK the FPGA auto-emits 6 unsolicited UART
+announce frames at t=2.8–3.6s; under OURS it emits **zero** — yet we can fully
+wake the same NV meter design at runtime (PB11+PC11 high + AA55 cmd → stream).
+Same silicon, same factory IAP bootloader at 0x08000000 (Unit 2 runs our app
+at 0x08007000 behind it, exactly as stock does), same reset pin state at FPGA
+power-up — so the strap-at-power-up theories can't explain a stock-vs-ours
+difference (both reach their app with identical floating-GPIO reset state).
+The difference that silences our FPGA's boot announce is NOT any pin level
+we've matched, and it is invisible to the 8 captured channels.
+
+**Conclusion: blind MCU-side iteration is exhausted.** Both remaining paths
+need NEW data, and both are now set up:
+1. maksidze recapture (PA2 + PB11 + PC0; ideally also a capture of OUR boot) —
+   asked on issue #18 (#issuecomment-4697137482).
+2. External Gowin programmer via M0-M3/VPP — SRAM-load the scope bitstream
+   (decouples "does the design run" from "does MCU config-entry work") and read
+   the GW1N JTAG status register to see WHY the MCU upload is rejected.
