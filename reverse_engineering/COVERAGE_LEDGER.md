@@ -51,9 +51,15 @@ The ledger lists every function with its class so the denominator is explicit, n
 | Class distribution | libc 111 · logic 80 · hardware 47 · render 41 · protocol 26 · asset 2 · unknown 2 |
 | Skip-justified (R=NA: libc/runtime/assets) | 119 |
 | **Meaningful (R≠NA: real device behavior)** | **190** |
-| RESOLVED, gross | 60/309 = 19.4% *(inflated — mostly auto-credited libc/runtime)* |
-| **RESOLVED, meaningful — THE HEADLINE** | **1/190 = 0.5%** |
+| RESOLVED, gross | 63/309 = 20.4% *(inflated — mostly auto-credited libc/runtime)* |
+| **RESOLVED, meaningful — THE HEADLINE** | **4/190 = 2.1%** *(was 0.5% at baseline)* |
 | Verified equivalent to stock (V≥2) | ~0 (22/22 critical units *diverged*) |
+
+### Resolve-loop log
+
+| Date | Functions resolved | Headline | Method |
+|---|---|---|---|
+| 2026-06-13 | `spi2_block_read`, `spi2_receive_byte`, `spi2_transceive_byte` (3) | 0.5% → **2.1%** | Static register-equivalence vs `flash_fs.c` (`flash_fs_raw_read` / `flash_fs_raw_spi_xfer`). Stock cmd-0x03 read protocol byte-identical to ours; Ghidra `i2c_transfer` is a mislabel of the SPI2 SR (TXE/RXNE) poll. V1 (static). |
 
 **Track the meaningful figure (0.5%), not the 19.4% gross** — the gross number is
 dominated by libc/FreeRTOS/USB-descriptor plumbing auto-credited as `R=NA`. Of the 190
@@ -67,7 +73,9 @@ the project.* Every point of it is now a concrete, checkable line in `coverage_l
 Fully decoded but mostly **not** reimplemented/verified — this is where the campaign
 lives: `master_init` (15.4KB early-boot bring-up — also the FPGA NV-awaken hypothesis),
 `gpio_mux_portc_porte` + `gpio_mux_porta_portb` (frontend relay + DAC trigger path),
-`fpga_spi3_transfer` (closest to done — gated on the issue-#18 bench litmus),
+`fpga_spi3_transfer` (V is genuinely bench-gated, not static-verifiable: the Ghidra
+decode @0x08037800 is register-context-corrupt — `unaff_r7`/`unaff_r9`/`in_ZR`, it's the
+misdecoded acquisition inner-loop; needs the issue-#18 0x04/0x05 readout litmus),
 `usart_tx_config_writer`, `scope_main_fsm`, `scope_measurement_engine`,
 `scope_mode_timebase`, `meter_data_process`, and the SPI2 flash primitives.
 Top-22 worklist with concrete next-actions is in the workflow result / will seed each session.

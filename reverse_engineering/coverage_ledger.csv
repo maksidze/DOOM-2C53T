@@ -134,9 +134,9 @@ addr,name,klass,D,R,V,resolved,note
 0802ee9c,spi2_sector_erase,hardware,D2,R0,V0,no,hardware: behavior not yet recovered (R0) - needs decode
 0802eee8,spi2_read_jedec_id,hardware,D2,R1,V0,no,hardware: partial understanding (R1) - confirm semantics/data
 0802ef48,spi2_init,hardware,D2,R1,V0,no,hardware: partial understanding (R1) - confirm semantics/data
-0802f048,spi2_block_read,hardware,D3,R2,V0,no,hardware: largely understood (R2) - verify/sign-off pending
-0802f0b8,spi2_receive_byte,hardware,D3,R2,V0,no,hardware: largely understood (R2) - verify/sign-off pending
-0802f0c4,spi2_transceive_byte,hardware,D3,R2,V0,no,hardware: largely understood (R2) - verify/sign-off pending
+0802f048,spi2_block_read,hardware,D3,R2,V1,yes,RESOLVED 2026-06-13: static-equiv to flash_fs_raw_read (flash_fs.c) - CS=PB12 BCR/BSRR / cmd 0x03 / 24-bit addr / N reads / CS high - byte-identical protocol
+0802f0b8,spi2_receive_byte,hardware,D3,R2,V1,yes,RESOLVED 2026-06-13: static-equiv to flash_fs_raw_spi_xfer(0xFF) in flash_fs.c
+0802f0c4,spi2_transceive_byte,hardware,D3,R2,V1,yes,RESOLVED 2026-06-13: static-equiv to flash_fs_raw_spi_xfer (poll TXE sts.1 / write dt / poll RXNE sts.0 / read dt) - ghidra i2c_transfer is mislabel of SPI2 SR poll
 0802f11c,spi2_wait_busy,hardware,D3,R0,V0,no,hardware: behavior not yet recovered (R0) - needs decode
 0802f16c,spi_flash_write_block,hardware,D2,R0,V0,no,hardware: behavior not yet recovered (R0) - needs decode
 0802f2ac,spi2_page_write_loop,hardware,D2,R0,V0,no,hardware: behavior not yet recovered (R0) - needs decode
