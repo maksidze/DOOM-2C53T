@@ -5,8 +5,10 @@ This repository contains a port of the legendary game **DOOM** for the **FNIRSI 
 This project is based on the **MG24 Doom BLE** codebase by [Nicola Wrachien (next-hack)](https://github.com/next-hack/MG24_Doom_BLE), which in turn is based on the GBA Doom Port by `doomhack` with improvements by `Kippyykip`. The code is optimized to run under tight RAM constraints and adapted for the hardware of the FNIRSI 2C53T.
 
 <p align="center">
-  <img src="scope.jpg" alt="FNIRSI 2C53T DOOM" width="400">
+  <img src="photo/photo_1_2026-06-14_04-47-52.jpg" alt="FNIRSI 2C53T DOOM" width="400">
 </p>
+
+Check out other photos of the oscilloscope in the [photo/](photo/) directory.
 
 ---
 
@@ -15,6 +17,7 @@ This project is based on the **MG24 Doom BLE** codebase by [Nicola Wrachien (nex
 *   **High-Quality Graphics:** The game renders at the original 320x200 resolution and is hardware-stretched to the 320x240 screen resolution (ST7789V via 16-bit parallel EXMC interface). Deep lighting (Z-depth lighting) is supported.
 *   **Button Controls:** Support for all 15 physical buttons on the device (scanned at 500 Hz with hardware debouncing).
 *   **Real-time OS:** Powered by FreeRTOS with separate tasks for rendering graphics and processing input.
+*   **Sound System** Does not work yet.
 
 ---
 
@@ -93,6 +96,10 @@ Flashing the firmware:
 2.  Upload the firmware file into the IAP section.
 3.  The oscilloscope will automatically restart with the new firmware.
 
+> [!IMPORTANT]
+> *   **First Boot Note:** The very first startup after flashing might be buggy, resulting in a flashing/blinking white screen. If this happens, power cycle the device (turn it off and back on manually) and wait for the game to load. Subsequent boots will be significantly faster.
+> *   **First Map Load Note:** The first time loading a map (after choosing the skill level) takes a long time (around 5 minutes). Subsequent map loads are much faster.
+
 To revert to the official firmware, flash the APP_2C53T_V1.2.0_251015.bin file.
 
 ---
@@ -115,3 +122,10 @@ Copy the resulting DOOM1.WAD file to the root directory of your USB flash drive.
 *   **Hardware Drivers (Screen, Buttons, Flash)**: The [OpenScope 2C53T](https://github.com/DavidClawson/OpenScope-2C53T) project.
 *   **printf Library**: Marco Paland (MIT License).
 *   **Font8x8 Library**: Daniel Hepper (Public Domain).
+
+---
+
+## Project Status
+
+> [!WARNING]
+> This project is a proof of concept. I am unlikely to fix any bugs or maintain this repository, as there is no practical sense or purpose in doing so.
