@@ -11,7 +11,18 @@ transition export via Logic 2 automation), `export/win*_{mosi,miso}.bin`
 Decoder: `analyze_capture.py`, UART: `decode_uart.py`, export: `export_sal.py`.
 
 **Channels:** 0=PB5 MOSI, 1=PB6 CS, 2=PB4 MISO, 3=PB3 SCK, 4=PA3 USART2_RX,
-5="PA4" (mislabel — dead line; stock TX is PA2, not captured), 6=PC6, 7=PB11.
+5=PA2 USART2_TX, 6=PC6, 7=PB11.
+
+> **CORRECTION 2026-06-13 (maksidze, issue #18):** channel 5 was mislabeled
+> "PA4" in the Logic 2 export but is **actually PA2** — stock's real MCU→FPGA
+> USART TX. So we had the TX line captured all along. Re-decoding it confirms
+> **stock transmits ZERO bytes on USART for the entire 10.5s boot** (only a
+> capture-end `00` artifact at 10.5s; line goes idle-HIGH at 1.383s and never
+> sends a start bit). This is DIRECT wire confirmation of the disassembly
+> finding (usart_boot_frames_exact.md) that stock sends no USART at boot — the
+> "biggest blind spot" was never blind. The pre-upload-USART removal in fpga.c
+> is therefore hard-confirmed correct, and a missing/hidden USART command is
+> definitively ruled out as the config-entry cause.
 
 ## Headline: the FPGA mystery is solved
 
