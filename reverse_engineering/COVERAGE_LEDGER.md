@@ -41,18 +41,36 @@ resolved once justified — we don't need to reimplement printf:
 
 The ledger lists every function with its class so the denominator is explicit, not fudged.
 
-## Baseline scoreboard (2026-06-13, pre-campaign)
+## Baseline scoreboard (MEASURED 2026-06-13 — `coverage_ledger.csv`, 309 functions)
 
-| Metric | Soft (old) | **Rigorous (this ledger)** |
-|---|---|---|
-| Named / role known | ~97% | (D≥1) ~97% |
-| Full register-level decode (D=3) | — | est. **~10–15%** (critical path + a few subsystems) |
-| Reimplemented (R≥2) | — | est. **~20–30%** (our firmware's working features) |
-| **Verified equivalent to stock (V≥2)** | — | **~0%** (22/22 critical units *diverged*) |
-| **RESOLVED (headline)** | "~99%" | **est. low single digits** |
+| Metric | Value |
+|---|---|
+| Named / role known (D≥1) | 304/309 = **98.4%** |
+| Full register-level decode (D=3) | 23/309 = **7.4%** |
+| Decode distribution | D0 5 · D1 254 · D2 27 · D3 23 |
+| Class distribution | libc 111 · logic 80 · hardware 47 · render 41 · protocol 26 · asset 2 · unknown 2 |
+| Skip-justified (R=NA: libc/runtime/assets) | 119 |
+| **Meaningful (R≠NA: real device behavior)** | **190** |
+| RESOLVED, gross | 60/309 = 19.4% *(inflated — mostly auto-credited libc/runtime)* |
+| **RESOLVED, meaningful — THE HEADLINE** | **1/190 = 0.5%** |
+| Verified equivalent to stock (V≥2) | ~0 (22/22 critical units *diverged*) |
 
-The gap between "~99% understood" and "~0% verified-equivalent" *is the project.* The
-ledger makes every point of it a concrete, checkable line item.
+**Track the meaningful figure (0.5%), not the 19.4% gross** — the gross number is
+dominated by libc/FreeRTOS/USB-descriptor plumbing auto-credited as `R=NA`. Of the 190
+functions with real product semantics, exactly **one** (`usart2_isr`) is resolved.
+
+The gap between "~99% understood" (old soft metric) and **0.5% meaningful-resolved** *is
+the project.* Every point of it is now a concrete, checkable line in `coverage_ledger.csv`.
+
+### The spine (23 D3 functions = the load-bearing nodes)
+
+Fully decoded but mostly **not** reimplemented/verified — this is where the campaign
+lives: `master_init` (15.4KB early-boot bring-up — also the FPGA NV-awaken hypothesis),
+`gpio_mux_portc_porte` + `gpio_mux_porta_portb` (frontend relay + DAC trigger path),
+`fpga_spi3_transfer` (closest to done — gated on the issue-#18 bench litmus),
+`usart_tx_config_writer`, `scope_main_fsm`, `scope_measurement_engine`,
+`scope_mode_timebase`, `meter_data_process`, and the SPI2 flash primitives.
+Top-22 worklist with concrete next-actions is in the workflow result / will seed each session.
 
 ## Relationship to the FPGA secret (honest)
 
