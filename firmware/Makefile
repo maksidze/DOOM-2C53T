@@ -299,6 +299,15 @@ guest: CFLAGS += -DGUEST_BUILD
 guest: LDSCRIPT = ld/at32f403a_guest.ld
 guest: clean all
 
+# Warm-handoff experiment build (guest image). fpga_init() comes up read-only
+# against a FPGA already scope-configured by stock — skips the SSPI config
+# sequence, boot/meter USART, frontend relays, and auto-tasks. Read with the
+# `spi3 acqread` shell command. See fpga.c FPGA_WARM_HANDOFF_TEST and
+# docs/fpga_warm_handoff_test.md.
+guest-warmtest: CFLAGS += -DGUEST_BUILD -DFPGA_WARM_HANDOFF_TEST=1
+guest-warmtest: LDSCRIPT = ld/at32f403a_guest.ld
+guest-warmtest: clean all
+
 # Flash app via USB HID bootloader (bootloader must be running)
 flash: $(BUILD_DIR)/$(TARGET).bin
 	uv run ../scripts/hid_flash.py $<
@@ -344,4 +353,4 @@ soak-test: emu
 soak-quick: emu
 	python3 ../scripts/soak_test.py --no-build --duration 30 --seed $(SOAK_SEED) --verbose
 
-.PHONY: all clean disasm size renode soak-test soak-quick flash flash-dfu bootloader flash-bootloader flash-all guest emu
+.PHONY: all clean disasm size renode soak-test soak-quick flash flash-dfu bootloader flash-bootloader flash-all guest guest-warmtest emu

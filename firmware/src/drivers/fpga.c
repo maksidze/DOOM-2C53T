@@ -265,6 +265,30 @@ static void spi3_pump(const uint8_t *tx, volatile uint8_t *rx, uint32_t n)
  * sweeps. The config-completion gap is elsewhere (prelude/config-enter or a
  * runtime command we haven't replayed). */
 #define SPI3_UPLOAD_BR  0u   /* /2 = 60MHz, matches stock */
+
+/* ─── WARM-HANDOFF EXPERIMENT (2026-06-13) ──────────────────────────────
+ * Set to 1 to build a "read-only" firmware for the stock→ours warm-handoff
+ * test. The premise: stock firmware successfully configures the FPGA's scope
+ * design at boot; the GW1N holds that SRAM config as long as power is
+ * maintained (an MCU soft-reset does NOT power-cycle it, and RECONFIG_N stays
+ * high). So if we boot stock (FPGA→scope-configured), then reflash to THIS
+ * build via the stock IAP path WITHOUT cutting power, our firmware comes up in
+ * front of an already-configured scope FPGA — letting us test our SPI3 read
+ * path in isolation, before the FT232H/JTAG hardware arrives.
+ *
+ * When 1, fpga_init() sets up SPI3 + the two control pins (PC6 enable, PB11
+ * active) to match stock's scope-run posture, but SKIPS everything that could
+ * disturb the running config: the boot USART commands, the SSPI config
+ * sequence (05/12/15/3B/3A), the meter-frontend relay routing, the meter USART
+ * commands, and all auto-tasks. Read with the `spi3 acqread` shell command
+ * (real 0x04/0x05 per-channel protocol). span>0 on CH1/CH2 = we read a live
+ * waveform from a stock-configured FPGA = our downstream path works.
+ *
+ * Bench procedure: docs/fpga_warm_handoff_test.md. Revert to 0 for normal builds. */
+#ifndef FPGA_WARM_HANDOFF_TEST
+#define FPGA_WARM_HANDOFF_TEST  0
+#endif
+
 static void spi3_set_br(uint32_t br)
 {
     FPGA_SPI->ctrl1 &= ~(1u << 6);              /* SPE = 0 */
@@ -1722,7 +1746,14 @@ void fpga_init(void)
      * Add an explicit delay to match the stock firmware's implicit
      * boot time. Try 2000ms as a conservative starting point.
      * --------------------------------------------------------------- */
+#if FPGA_WARM_HANDOFF_TEST
+    /* FPGA is already configured by stock — don't wait 2s (that long float
+     * is what stopped capture in round 1). PC6/PB11/PC11 were driven to scope
+     * posture at the very top of main(); just settle briefly. */
+    systick_delay_ms(50);
+#else
     systick_delay_ms(2000);
+#endif
 
     /* ---------------------------------------------------------------
      * Step 3b: USART boot commands — sent BEFORE the SPI3 phase
@@ -1733,6 +1764,7 @@ void fpga_init(void)
      * unarmed; the prior after-upload order came from the debunked
      * FUN_08027a50 reading (see docs/fpga_bitstream_replay_plan.md).
      * --------------------------------------------------------------- */
+#if !FPGA_WARM_HANDOFF_TEST
     usart2_send_cmd(0x00, FPGA_CMD_INIT_01);  /* 0x01: Channel init */
     systick_delay_ms(50);
     usart2_send_cmd(0x00, FPGA_CMD_INIT_02);  /* 0x02: Signal gen setup */
@@ -1743,6 +1775,7 @@ void fpga_init(void)
     systick_delay_ms(50);
     usart2_send_cmd(0x00, FPGA_CMD_INIT_08);  /* 0x08: Meter configure */
     systick_delay_ms(100);
+#endif  /* !FPGA_WARM_HANDOFF_TEST — skip: would disturb stock-loaded config */
 
     /* ---------------------------------------------------------------
      * Step 4: SPI3 peripheral init — Mode 3, Master, /2 prescaler
@@ -1905,12 +1938,30 @@ void fpga_init(void)
      * handshake now lives in fpga_spi3_config_sequence() so the debug shell
      * (`fpga reinit`) can replay it on demand for fast iteration without a
      * reflash. Parameters let us sweep the variables under investigation. */
+#if FPGA_WARM_HANDOFF_TEST
+    /* Warm-handoff test: the FPGA was already configured (scope) by stock
+     * before the no-power-loss handoff. Do NOT run the SSPI config sequence —
+     * it would attempt a reconfig the running design ignores anyway, and we
+     * keep the wire quiet to be safe. Just arm PB11 (active mode) to match
+     * stock's scope-run posture (PC6 is already HIGH from above), mark init
+     * done, and bail before the meter-frontend routing + meter USART commands.
+     * Read with `spi3 acqread`. */
+    gpio_cfg.gpio_pins = GPIO_PINS_11;
+    gpio_cfg.gpio_mode = GPIO_MODE_OUTPUT;
+    gpio_cfg.gpio_out_type = GPIO_OUTPUT_PUSH_PULL;
+    gpio_cfg.gpio_drive_strength = GPIO_DRIVE_STRENGTH_STRONGER;
+    gpio_init(GPIOB, &gpio_cfg);
+    GPIOB->scr = PB11_MASK;   /* PB11 HIGH — FPGA active (match stock scope) */
+    fpga.initialized = true;
+    return;
+#else
     fpga_spi3_config_sequence(&(fpga_cfg_seq_opts_t){
         .upload_br      = SPI3_UPLOAD_BR,
         .prelude_gap_ms = 100,
         .post_close_ms  = 600,
         .arm_pb11       = 1,
     });
+#endif
 
     /* USART boot commands (0x01,0x02,0x06,0x07,0x08) now sent in
      * Step 3b, BEFORE the SPI3 phase — stock-validated Phase 4 order. */
@@ -2068,11 +2119,19 @@ QueueHandle_t fpga_create_tasks(void)
     spi3_acq_queue = xQueueCreate(15, sizeof(uint8_t));
     meter_sem      = xSemaphoreCreateBinary();
 
+#if FPGA_WARM_HANDOFF_TEST
+    /* Warm-handoff test: create NO auto-tasks. The acquisition task uses the
+     * old 0x80|range read and would both disturb the FPGA and compete with the
+     * manual `spi3 acqread` probe; the meter poll/USART tasks could switch the
+     * FPGA out of scope mode. We drive everything from the debug shell. */
+    (void)tx_task_handle; (void)rx_task_handle; (void)acq_task_handle;
+#else
     /* Create tasks (stack sizes and priorities match stock firmware) */
     xTaskCreate(fpga_usart_tx_task,    "dvom_TX",   64,  NULL, 2, &tx_task_handle);
     xTaskCreate(fpga_usart_rx_task,    "dvom_RX",   128, NULL, 3, &rx_task_handle);
     xTaskCreate(fpga_acquisition_task, "fpga",      256, NULL, 3, &acq_task_handle);
     xTaskCreate(fpga_meter_poll_task,  "meter_poll", 64, NULL, 2, NULL);
+#endif
 
     return spi3_acq_queue;
 }

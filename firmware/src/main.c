@@ -398,6 +398,21 @@ int main(void)
     crm_periph_clock_enable(CRM_IOMUX_PERIPH_CLOCK, TRUE);
     crm_periph_clock_enable(CRM_XMC_PERIPH_CLOCK, TRUE);
 
+#if FPGA_WARM_HANDOFF_TEST
+    /* Warm-handoff round 2: drive the FPGA control pins to stock's scope-run
+     * posture as EARLY as possible (right after the GPIO clocks) to minimise
+     * the float window. Round 1 left these floating through ~2 s of init, which
+     * knocked the FPGA out of continuous-capture; we caught one buffer then it
+     * went idle. Restore PC6(SPI-en)=HIGH, PB11(active)=HIGH, PC11(meter mux)=LOW
+     * (scope posture) before anything else. See docs/fpga_warm_handoff_test.md. */
+    GPIOC->cfglr = (GPIOC->cfglr & ~(0xFu << 24)) | (0x3u << 24); /* PC6 PP 50MHz */
+    GPIOC->scr   = (1u << 6);                                     /* PC6 HIGH */
+    GPIOB->cfghr = (GPIOB->cfghr & ~(0xFu << 12)) | (0x3u << 12); /* PB11 PP 50MHz */
+    GPIOB->scr   = (1u << 11);                                    /* PB11 HIGH */
+    GPIOC->cfghr = (GPIOC->cfghr & ~(0xFu << 12)) | (0x3u << 12); /* PC11 PP 50MHz */
+    GPIOC->clr   = (1u << 11);                                    /* PC11 LOW (scope) */
+#endif
+
     /* PB8 = LCD backlight ON */
     GPIOB->cfghr = (GPIOB->cfghr & ~(0xF << 0)) | (0x3 << 0); /* PB8 push-pull 50MHz */
     GPIOB->scr = (1 << 8);
