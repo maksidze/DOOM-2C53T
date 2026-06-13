@@ -202,6 +202,34 @@ divergences not covered by a knob, add one (cheap) rather than reflashing per-te
     THEN config. All other MCU-side SSPI levers are now exhausted with proof.
   - Probe knobs (`pe`/`rl` + `edit_mode_status`) UNCOMMITTED — good permanent diagnostics.
 
+- **2026-06-13 (resolve loop → master_init decode-diff workflow, 15 agents) — NEW RANKED
+  HYPOTHESIS, pre-config divergences found.** Decomposed `master_init` (15.4KB) into 14
+  regions, decoded each to register level, diffed vs our firmware. Verdict: master_init is
+  honestly **D2/R0** (13/14 regions D3; dma D2; R0 floor = saved-config/cal-table restore
+  ABSENT). Full report: `analysis_v120/master_init_decode_diff_2026-06-13.md`. The ranked
+  config-entry hypotheses (most-promising first):
+  1. **Pre-0x3B USART burst (HIGH):** our *default* build sends USART cmds 0x01/02/06/07/08
+     to the running NV design BEFORE the 0x3B upload — stock sends ZERO. Commanding the NV
+     user design plausibly switches its user-mode SPI slave onto the shared SSPI pins
+     (prelude MISO 0x80 user-mode vs stock 0xFF config-wait float) → 0x3B CONFIG_ENABLE
+     ignored. Exp 7 already showed silencing flips prelude 0x80→0xFF. **The USART-silent
+     bench build alone did NOT move the wall — so this is contributory, test it STACKED.**
+  2. **Frontend relays floating during upload (HIGH):** stock drives the full relay/gain
+     bank to range-5 (PC12/PE4/PE5/PE6/PA15/PA10/PB10/PB11 + PB9=L/PA6=L) DURING
+     master_init before the 0x3B open; we leave them floating through the upload window. If
+     the GW1N samples any as config straps/analog-env, floating = reject.
+  3. **PB11 timing:** stock raises PB11 ≥1ms before the bare CS sync pulse; we hold it late.
+  4. **PC9 polarity:** stock drives PC9 **LOW** (GPIOC→clr); we drive HIGH (scr). If PC9
+     straps the FPGA config domain, inverted level could block config.
+  - **🎯 RECOMMENDED EXPERIMENT (stacks #1+#2, TRUE COLD power-cycle — FPGA is stateful):**
+    build with `FPGA_USART_SILENT_SCOPE=1` AND, immediately after PC6 HIGH / before the
+    0x3B prelude, drive the stock range-5 frontend posture with PB11 raised ≥1ms before the
+    CS sync pulse. Capture PB3/4(MISO)/5/6 + PC6 + PB11 on Saleae; read `fpga.init_hs` via
+    `status`. **PASS** = prelude MISO 0xFF, 0x11 IDCODE = 01 20 68 1B, 0x3A close = 0xF8,
+    status-read 03 → 00 01 42 2E 2E, PC0 active. If pass, bisect (silent-alone vs
+    relays-alone) to attribute cause. If still 0xFF/no-DONE → escalate to FSMC-bus capture
+    (hyp #7: does stock even carry scope data on SPI3?) + external Gowin-programmer load.
+
 ## Key references
 
 - Decompile: `reverse_engineering/decompiled_2C53T_v2.c`, `analysis_v120/master_init_phase[1-4].c`,

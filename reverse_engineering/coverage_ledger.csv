@@ -90,7 +90,7 @@ addr,name,klass,D,R,V,resolved,note
 08021de4,scope_draw_channel_info,render,D1,R1,V0,no,render: partial understanding (R1) - confirm semantics/data
 08022d40,FUN_08022d40,unknown,D0,R0,V0,no,unknown: behavior not yet recovered (R0) - needs decode
 08022e14,lcd_draw_bitmap_from_flash,render,D1,R0,V0,no,render: behavior not yet recovered (R0) - needs decode
-08023a50,master_init,hardware,D3,R1,V0,no,hardware: partial understanding (R1) - confirm semantics/data
+08023a50,master_init,hardware,D2,R0,V0,no,DECODED 2026-06-13 (14-region workflow): 13/14 regions D3 but dma region D2 (USART2-RX DMA channel + 0x40005C00 USB mislabel unresolved) so overall D2. Reimpl R0 floor: flash_cfg_cal cal-table restore ABSENT (no saved-config read/magic-validate/40-entry gain-offset table); analog_frontend DAC1 trigger path absent + relay bits inverted; spi3_handshake default build sends non-stock USART pre-0x3B (top config-entry suspect). R2 only adc1/usart2_fpga/iwdg. Full: analysis_v120/master_init_decode_diff_2026-06-13.md
 0802771c,tmr3_isr,hardware,D2,R1,V0,no,hardware: partial understanding (R1) - confirm semantics/data
 080277b4,usart2_isr,protocol,D3,R2,V1,yes,resolved
 080278e4,usb_endpoint_handler,hardware,D1,R0,V0,no,hardware: behavior not yet recovered (R0) - needs decode
