@@ -43,17 +43,26 @@ The ledger lists every function with its class so the denominator is explicit, n
 
 ## Baseline scoreboard (MEASURED 2026-06-13 — `coverage_ledger.csv`, 309 functions)
 
-| Metric | Value |
-|---|---|
-| Named / role known (D≥1) | 304/309 = **98.4%** |
-| Full register-level decode (D=3) | 23/309 = **7.4%** |
-| Decode distribution | D0 5 · D1 254 · D2 27 · D3 23 |
-| Class distribution | libc 111 · logic 80 · hardware 47 · render 41 · protocol 26 · asset 2 · unknown 2 |
-| Skip-justified (R=NA: libc/runtime/assets) | 119 |
-| **Meaningful (R≠NA: real device behavior)** | **190** |
-| RESOLVED, gross | 63/309 = 20.4% *(inflated — mostly auto-credited libc/runtime)* |
-| **RESOLVED, meaningful — THE HEADLINE** | **4/190 = 2.1%** *(was 0.5% at baseline)* |
-| Verified equivalent to stock (V≥2) | ~0 (22/22 critical units *diverged*) |
+| Metric | Baseline | Current (2026-06-13) |
+|---|---|---|
+| Full register-level decode (D=3) | 23/309 = 7.4% | **75/309 = 24.3%** |
+| Skip-justified (R=NA) | 119 | **180** |
+| **Meaningful (R≠NA: real device behavior)** | 190 | **129** |
+| RESOLVED, gross | 60/309 | 125/309 |
+| **RESOLVED, meaningful — THE HEADLINE** | 1/190 = 0.5% | **5/129 = 3.9%** |
+| Verified equivalent to stock (V≥1, meaningful) | ~0 | 4 (SPI2 ×3 + lcd_read_data) |
+
+**Honest reading of the 0.5%→3.9% move:** most of it is **denominator correction**, not new
+proven behavior. The verify-first harvest reclassified **61 functions** out of "meaningful":
+46 are the **FreeRTOS kernel we vendor wholesale** (mis-scored R2; they're `NA(same source)`)
+and 15 are **our own original UI/font/scope-draw** (`NA(our own impl)`). Genuine **numerator**
+growth this round = **1 trivial driver** (`lcd_read_data`, an EXMC mirror, V1 static / not
+bench-confirmed). The **real win is decode depth: D3 jumped 23→75** — we now fully understand
+those 52 kernel/UI functions (incl. confirming the `lcd_draw_pixel`/`lcd_set_window`/
+`lcd_fill_color` Ghidra names are **mislabels** — they're AA-framebuffer/curve rasterizers,
+not LCD primitives). **⚠️ Ledger-name hazard:** ~40 of the 46 `NA(same source)` rows still
+carry wrong Ghidra names (`timer_*` → actually queue/task/heap/list primitives); the
+*classification* is verified-correct, the *names* need a later correction pass.
 
 ### Resolve-loop log
 
@@ -62,13 +71,17 @@ The ledger lists every function with its class so the denominator is explicit, n
 | 2026-06-13 | `spi2_block_read`, `spi2_receive_byte`, `spi2_transceive_byte` (3) | 0.5% → **2.1%** | Static register-equivalence vs `flash_fs.c` (`flash_fs_raw_read` / `flash_fs_raw_spi_xfer`). Stock cmd-0x03 read protocol byte-identical to ours; Ghidra `i2c_transfer` is a mislabel of the SPI2 SR (TXE/RXNE) poll. V1 (static). |
 | 2026-06-13 | `master_init` decode-diff (14-region workflow) — honest D3/R1→**D2/R0** correction | 2.1% (no change — still unresolved) | 13/14 regions decoded to D3; reimpl floor R0 (cal-table restore absent). **Output: a ranked, testable FPGA config-entry hypothesis** (pre-0x3B USART burst + floating frontend relays) — the campaign's stated win condition. See `analysis_v120/master_init_decode_diff_2026-06-13.md` + plan-doc Current State. |
 | 2026-06-13 | `flash_cfg_cal` detour — live W25Q128 dump from Unit 2 | 2.1% (elimination result) | Drove the device's `flash dump` shell directly (no reflash) + offline FAT12 parse. **Factory cal is NOT on the W25Q:** the chip is UI JPEGs + screenshots + one *empty* `9999.BIN` config placeholder (cluster 0 / size 0), two volumes filling all 16 MB with no raw region. Narrows the R0 `flash_cfg_cal` blocker to MCU flash `0x08006000` (overwritten by our app) or the FPGA bitstream. Tooling: `scripts/flash_capture.py`. See `analysis_v120/w25q128_flash_map_2026-06-13.md`. |
+| 2026-06-13 | verify-first harvest (8-agent workflow) — 62 of the 63 R2-unresolved classified | 2.1% → **3.9%** (denominator-shrink + 1 driver) | 46 `NA(same FreeRTOS source)` (kernel verified present in build) + 15 `NA(our own UI)` + **1 VERIFY_FAITHFUL** (`lcd_read_data` V1) + 1 held UNRESOLVED (`fpga_spi3_transfer`, FPGA wall). **D3 23→75.** Honest: mostly denominator correction; genuine proven-equivalent device behavior added = 1 trivial fn. Surfaced the `lcd_*` Ghidra mislabels + the kernel-name hazard. |
 
-**Track the meaningful figure (0.5%), not the 19.4% gross** — the gross number is
-dominated by libc/FreeRTOS/USB-descriptor plumbing auto-credited as `R=NA`. Of the 190
-functions with real product semantics, exactly **one** (`usart2_isr`) is resolved.
+**Track the meaningful figure (3.9%), not the gross (40%+)** — the gross number is
+dominated by libc/FreeRTOS/USB-descriptor plumbing auto-credited as `R=NA`. Of the 129
+functions with real device semantics, **5** are resolved (`usart2_isr`, SPI2 ×3,
+`lcd_read_data`).
 
-The gap between "~99% understood" (old soft metric) and **0.5% meaningful-resolved** *is
+The gap between "~99% understood" (old soft metric) and **3.9% meaningful-resolved** *is
 the project.* Every point of it is now a concrete, checkable line in `coverage_ledger.csv`.
+The honest path up from here is **numerator** growth — faithfully reimplementing + verifying
+the genuine drivers/protocol (the R1 frontend/scope/meter cluster), not more NA reclasss.
 
 ### The spine (23 D3 functions = the load-bearing nodes)
 
