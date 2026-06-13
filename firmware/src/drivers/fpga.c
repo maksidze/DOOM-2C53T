@@ -1483,6 +1483,13 @@ uint8_t fpga_spi3_config_sequence(const fpga_cfg_seq_opts_t *opt)
      * CS-gated, desync the command parser so CONFIG_ENABLE (0x15) never lands.
      * Removed entirely below. See SPI3_STOCK_BOOT_CAPTURE_ANALYSIS.md. */
 
+    /* Command-phase clock. The SSPI read path is clock-limited (IDCODE reads
+     * garbage at /2, clean at /256), so the prelude/close/status all run at
+     * opt->cmd_br here; only the bulk 0x3B payload switches to opt->upload_br
+     * and then returns to cmd_br for the close/status reads. Restored to /2 at
+     * function exit. */
+    spi3_set_br(opt->cmd_br);
+
     /* [0] bare CS pulse — CS low→high with ZERO clocks (stock t=3.6082).
      * A CS assertion is the SSPI frame-sync that resets the command FSM. */
     SPI3_CS_DEASSERT();
@@ -1492,32 +1499,55 @@ uint8_t fpga_spi3_config_sequence(const fpga_cfg_seq_opts_t *opt)
     SPI3_CS_DEASSERT();
     fpga_scope_delay_ms(opt->prelude_gap_ms);   /* stock waits ~100ms → 0x05 */
 
-    /* [1] 05 00 */
-    SPI3_CS_ASSERT();
-    fpga.init_hs[1] = spi3_xfer(0x05);
-    fpga.init_hs[2] = spi3_xfer(0x00);
-    SPI3_CS_DEASSERT();
-    fpga_scope_delay_ms(opt->prelude_gap_ms);
+    /* [1-3] CONFIG_ENABLE prelude — 05 00 / 12 00 / 15 00.
+     * Framing per opt->prelude_frame_mode (sweep knob; 0 = stock-faithful):
+     *   0 split    : CS↓05 00↑ | CS↓12 00↑ | CS↓15 00↑   (then 3B in its own frame)
+     *   1 combined : CS↓05 00 12 00 15 00↑                (then 3B in its own frame)
+     *   2 merge    : CS↓05 00↑ | CS↓12 00↑ | CS↓15 00 3B <table>↑  (15 shares upload frame)
+     * init_hs[] capture indices are identical across all three. */
+    if (opt->prelude_frame_mode == 1) {
+        SPI3_CS_ASSERT();
+        fpga.init_hs[1] = spi3_xfer(0x05);
+        fpga.init_hs[2] = spi3_xfer(0x00);
+        fpga.init_hs[4] = spi3_xfer(0x12);
+        fpga.init_hs[5] = spi3_xfer(0x00);
+        fpga.init_hs[7] = spi3_xfer(0x15);
+        fpga.init_hs[8] = spi3_xfer(0x00);
+        SPI3_CS_DEASSERT();
+    } else {
+        /* [1] 05 00 */
+        SPI3_CS_ASSERT();
+        fpga.init_hs[1] = spi3_xfer(0x05);
+        fpga.init_hs[2] = spi3_xfer(0x00);
+        SPI3_CS_DEASSERT();
+        fpga_scope_delay_ms(opt->prelude_gap_ms);
 
-    /* [2] 12 00 */
-    SPI3_CS_ASSERT();
-    fpga.init_hs[4] = spi3_xfer(0x12);
-    fpga.init_hs[5] = spi3_xfer(0x00);
-    SPI3_CS_DEASSERT();
-    fpga_scope_delay_ms(opt->prelude_gap_ms);
+        /* [2] 12 00 */
+        SPI3_CS_ASSERT();
+        fpga.init_hs[4] = spi3_xfer(0x12);
+        fpga.init_hs[5] = spi3_xfer(0x00);
+        SPI3_CS_DEASSERT();
+        fpga_scope_delay_ms(opt->prelude_gap_ms);
 
-    /* [3] 15 00 — stock proceeds to 0x3B just 8µs later, no gap */
-    SPI3_CS_ASSERT();
-    fpga.init_hs[7] = spi3_xfer(0x15);
-    fpga.init_hs[8] = spi3_xfer(0x00);
-    SPI3_CS_DEASSERT();
+        /* [3] 15 00 — own frame (mode 0) or held LOW into the upload (mode 2) */
+        SPI3_CS_ASSERT();
+        fpga.init_hs[7] = spi3_xfer(0x15);
+        fpga.init_hs[8] = spi3_xfer(0x00);
+        if (opt->prelude_frame_mode != 2) SPI3_CS_DEASSERT();
+    }
 
-    /* [4] bitstream upload — 0x3B + full table in ONE CS frame. */
-    SPI3_CS_ASSERT();
+    /* Optional digest gap between CONFIG_ENABLE and the data stream (stock ~8µs
+     * → default 0). Skipped in merge mode, where CS stays LOW into the upload. */
+    if (opt->prelude_frame_mode != 2)
+        fpga_scope_delay_ms(opt->pre_upload_gap_ms);
+
+    /* [4] bitstream upload — 0x3B + full table. mode 2 continues the CS frame
+     * opened by 15 00; modes 0/1 open a fresh CS frame here. */
+    if (opt->prelude_frame_mode != 2) SPI3_CS_ASSERT();
     fpga.init_hs[10] = spi3_xfer(0x3B);  /* open upload */
     spi3_set_br(opt->upload_br);
     spi3_pump(fpga_h2_cal_table, NULL, FPGA_H2_CAL_TABLE_SIZE);
-    spi3_set_br(0);                      /* restore /2 (60MHz) */
+    spi3_set_br(opt->cmd_br);            /* back to command clock for close/status */
     SPI3_CS_DEASSERT();
     fpga.h2_bytes_sent = FPGA_H2_CAL_TABLE_SIZE;
     fpga.h2_upload_done = 1;
@@ -1552,6 +1582,8 @@ uint8_t fpga_spi3_config_sequence(const fpga_cfg_seq_opts_t *opt)
     for (unsigned i = 0; i < 4; i++)
         fpga.scope_status[i] = spi3_xfer(0xFF);
     SPI3_CS_DEASSERT();
+
+    spi3_set_br(0);                      /* restore /2 (60MHz) for normal acq */
 
     if (sched_running && acq_task_handle) vTaskResume(acq_task_handle);
 

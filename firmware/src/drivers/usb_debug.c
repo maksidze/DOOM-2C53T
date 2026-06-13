@@ -428,7 +428,8 @@ static void cmd_help(void)
         "spi3 read [len]                 Raw SPI3 read + hex dump\r\n"
         "spi3 xfer <hex...>              Send arbitrary MOSI bytes, dump MISO\r\n"
         "spi3 seq <b..> | <b..>          xfer w/ mid-sequence CS pulse at '|'\r\n"
-        "fpga reinit [br] [gap] [close]   Replay SPI3 config handshake + report\r\n"
+        "fpga reinit [br][gap][close][f0|1|2][u<ms>][a-e<pin>] Replay cfg+report\r\n"
+        "    f=prelude frame: 0 split(stock) 1 combined 2 merge15+3B; u=pre-upload gap; k<br>=cmd-phase clk div\r\n"
         "spi3 acqread                    Read CH1/CH2 via real 0x04/0x05 protocol\r\n"
         "spi3 gowin                      Read+decode Gowin ID/USERCODE/STATUS regs\r\n"
         "spi3 scopetest [bank]           Full scope seq: USART cfg->PC0->0x04/05 read\r\n"
@@ -2002,6 +2003,7 @@ static void cmd_fpga_reinit(const char *args)
     fpga_cfg_seq_opts_t opt = {
         .upload_br = 0, .prelude_gap_ms = 100, .post_close_ms = 600, .arm_pb11 = 1,
         .reset_port = 0, .reset_pin = 0, .reset_low_ms = 10,
+        .prelude_frame_mode = 0, .pre_upload_gap_ms = 0, .cmd_br = 0,
     };
     char buf[80];
     if (args && *args) {
@@ -2011,23 +2013,40 @@ static void cmd_fpga_reinit(const char *args)
         char *t0 = strtok_r(buf, " \t", &save);
         char *t1 = t0 ? strtok_r(NULL, " \t", &save) : NULL;
         char *t2 = t1 ? strtok_r(NULL, " \t", &save) : NULL;
-        char *t3 = t2 ? strtok_r(NULL, " \t", &save) : NULL;  /* reset pin spec, e.g. b9 */
         if (t0) opt.upload_br      = (uint32_t)strtoul(t0, NULL, 0);
         if (t1) opt.prelude_gap_ms = (uint32_t)strtoul(t1, NULL, 0);
         if (t2) opt.post_close_ms  = (uint32_t)strtoul(t2, NULL, 0);
-        if (t3 && t3[0] >= 'a' && t3[0] <= 'e' && t3[1]) {  /* <port><pin>: a..e + 0..15 */
-            opt.reset_port = (uint8_t)(t3[0] - 'a' + 1);
-            opt.reset_pin  = (uint8_t)strtoul(t3 + 1, NULL, 10);
+        /* Remaining tokens are optional, order-independent, prefix-classified:
+         *   a..e<pin> = FPGA reset pulse pin (e.g. b9)
+         *   f<0|1|2>  = prelude frame mode (split/combined/merge)
+         *   u<ms>     = pre-upload digest gap after CONFIG_ENABLE */
+        for (char *tk = strtok_r(NULL, " \t", &save); tk;
+             tk = strtok_r(NULL, " \t", &save)) {
+            if (tk[0] >= 'a' && tk[0] <= 'e' && tk[1]) {   /* <port><pin> */
+                opt.reset_port = (uint8_t)(tk[0] - 'a' + 1);
+                opt.reset_pin  = (uint8_t)strtoul(tk + 1, NULL, 10);
+            } else if (tk[0] == 'f') {
+                opt.prelude_frame_mode = (uint8_t)strtoul(tk + 1, NULL, 10);
+            } else if (tk[0] == 'u') {
+                opt.pre_upload_gap_ms = (uint32_t)strtoul(tk + 1, NULL, 0);
+            } else if (tk[0] == 'k') {  /* 'k' (clock) — NOT 'c', which collides
+                                         * with reset-port c (a..e) above */
+                opt.cmd_br = (uint32_t)strtoul(tk + 1, NULL, 0);
+            }
         }
     }
 
+    static const char *const frame_name[] = { "split", "combined", "merge" };
+    const char *fn = opt.prelude_frame_mode < 3 ? frame_name[opt.prelude_frame_mode] : "?";
     if (opt.reset_port)
-        usb_debug_printf("reinit: br=%lu gap=%lums close=%lums RESET=%c%u(%ums)\r\n",
+        usb_debug_printf("reinit: br=%lu gap=%lums close=%lums frame=%s(%u) upgap=%lums cmdbr=%lu RESET=%c%u(%ums)\r\n",
                          opt.upload_br, opt.prelude_gap_ms, opt.post_close_ms,
+                         fn, opt.prelude_frame_mode, opt.pre_upload_gap_ms, opt.cmd_br,
                          'A' + opt.reset_port - 1, opt.reset_pin, opt.reset_low_ms);
     else
-        usb_debug_printf("reinit: br=%lu prelude_gap=%lums post_close=%lums (no reset)\r\n",
-                         opt.upload_br, opt.prelude_gap_ms, opt.post_close_ms);
+        usb_debug_printf("reinit: br=%lu prelude_gap=%lums post_close=%lums frame=%s(%u) upgap=%lums cmdbr=%lu (no reset)\r\n",
+                         opt.upload_br, opt.prelude_gap_ms, opt.post_close_ms,
+                         fn, opt.prelude_frame_mode, opt.pre_upload_gap_ms, opt.cmd_br);
 
     uint8_t close = fpga_spi3_config_sequence(&opt);
 

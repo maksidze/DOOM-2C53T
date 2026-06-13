@@ -64,6 +64,26 @@ We have the plain **QN48** → use **8/9/10/11**. (Power pins also differ — QN
 
 **Bench trace → wire:** with the DMM, buzz each of the 5 gold pads to find which FPGA pin it lands on, then wire per the table above — pad→pin 9 = TCK → AD0; pin 10 = TDI → AD1; pin 11 = TDO → AD2; pin 8 = TMS → AD3; pin 2 (or any board GND) = GND. No datasheet-squinting needed at the bench.
 
+### Full QN48 config-pin map — the 5-pad target list (authoritative, UG171 QN48 column)
+Every pin a gold pad could plausibly land on, so a traced "pad → pin N" is a one-line lookup:
+
+| Signal | QN48 pin | What it means if a pad lands here |
+|--------|---------:|-----------------------------------|
+| **TMS** | **8**  | JTAG → wire to AD3 |
+| **TCK** | **9**  | JTAG → wire to AD0 |
+| **TDI** | **10** | JTAG → wire to AD1 |
+| **TDO** | **11** | JTAG → wire to AD2 |
+| **JTAGSEL_N** | **3** | JTAG-reconfig select; if exposed, pulling LOW guarantees JTAG is live |
+| **RECONFIG_N** | **48** | **config-entry trigger candidate** — a LOW pulse re-triggers configuration. If stock pulses this at boot, it's the mechanism we've been hunting. |
+| **MODE0** | **13** | the only externally-strappable config-mode bit (see below) |
+| MODE1 | GND | internally grounded in QN48 → fixed 0 |
+| MODE2 | GND | internally grounded in QN48 → fixed 0 |
+| GND (VSS) | **2** (also 26) | shared reference |
+
+**MODE strapping (confirmed 2026-06-13, UG171 QN48 column):** MODE1 and MODE2 are **internally tied to GND** in the QN48 package — only MODE0 (pin 13) is externally settable. So `MODE[2:0] = 0,0,MODE0` = `00X`, which per UG103 Table 1-3 is the **JTAG / Autoboot / SSPI** group. **The part is hardware-permitted to accept JTAG configuration** — a green light for the FT232H path before we even wire it. (If MODE0 also reads 0, it's `000` = JTAG + Autoboot.)
+
+> ⚠️ Doc note: the GW1N-2 QN48 numbers above come from **UG171** (*GW1N-2 Pinout*). Do **not** read pin numbers from **UG114** — that is the **GW1N-9** pinout (different die); its JTAG numbers happen to coincide but its non-JTAG config pins do not.
+
 ### Core voltage (for sanity-checking VDD/VPP during the trace)
 - GW1N-**UV** version: **VCC core = 1.8 / 2.5 / 3.3V** (UV does not use the 1.2V LV core). VCCX = 2.5/3.3V. I/O (VCCIO) typically 3.3V here. (Source: UG103 §1.2, "UV version devices support 1.8V, 2.5V, and 3.3V VCC".)
 

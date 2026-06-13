@@ -228,6 +228,25 @@ typedef struct {
     uint8_t  reset_port;      /* 0=none, 1=A,2=B,3=C,4=D,5=E */
     uint8_t  reset_pin;       /* 0..15 */
     uint16_t reset_low_ms;    /* LOW duration (rosenrot uses 10) */
+    /* Prelude framing sweep — how the 05/12/15 CONFIG_ENABLE prelude is split
+     * across chip-select frames relative to the 0x3B upload. Our baseline
+     * (mode 0) is wire-faithful to the stock capture; modes 1/2 are deviations
+     * to test whether the FPGA needs a different framing to enter SSPI receive
+     * mode. See SPI3_STOCK_BOOT_CAPTURE_ANALYSIS.md / issue #18. */
+    uint8_t  prelude_frame_mode; /* 0=split (stock: 05|12|15|3B), 1=combined
+                                  *   (05 12 15 in one CS frame, then 3B),
+                                  *   2=merge (05|12|15+3B share one CS frame) */
+    uint32_t pre_upload_gap_ms;  /* delay between the prelude and the 0x3B open
+                                  *   (stock ~8us → 0; lets the FPGA digest
+                                  *   CONFIG_ENABLE before data starts) */
+    uint32_t cmd_br;             /* SPI3 baud divider for the COMMAND phase —
+                                  *   prelude (05/12/15), 0x3A close, 0x03 status
+                                  *   reads (0=/2 default). The SSPI read path is
+                                  *   clock-limited: IDCODE reads as garbage at /2
+                                  *   but clean at /256, so the close/status bytes
+                                  *   we sample at /2 may be unreliable and the
+                                  *   CONFIG_ENABLE prelude may not land. Sweep
+                                  *   this to send + read the handshake slowly. */
 } fpga_cfg_seq_opts_t;
 
 /* Run the full SPI3 config handshake. Returns the 0x3A close status byte
