@@ -194,6 +194,9 @@ openFPGALoader -c ft232 -m scope.fs
   openFPGALoader -c ft232 -m --file-type bin scope.bin
   ```
   `--file-type` overrides extension-based detection. **Caveat to verify on the bench:** a `.fs` is an ASCII bitfile, while this is the *binary* config stream. If `--file-type bin` is rejected or loads garbage, the cleaner path is to obtain/rebuild a proper `.fs` from GowinEDA, or convert. Start with `--detect` (no file) to prove the chain before worrying about file format.
+- **Pre-staged files** (verified: 115,638 B, sha256 `5a0e7338…`, preamble + IDCODE `0x0120681B`):
+  - `fpga_bitstream/scope_bitstream_2c53t_v120.bin` — the raw on-wire config stream (**primary**; use with `-m --file-type bin`).
+  - `fpga_bitstream/scope_bitstream_2c53t_v120.fs` — a hand-built ASCII `.fs` fallback (round-trips to the same sha256). **Bit order (MSB-first/byte) is UNVERIFIED until the bench** — if loading the `.fs` gives a CRC/IDCODE error that the raw `.bin` does not, the bit order is wrong; regenerate with `fpga_bitstream/make_fs.py`. Order of preference at the bench: raw `.bin` first, this `.fs` second, GowinEDA `.fs` if both fail.
 
 ### 5c. Read config status / readback (diagnose the config-reject)
 After (or instead of) a load, query the FPGA status register to see why config is rejected:
