@@ -132,8 +132,8 @@ addr,name,klass,D,R,V,resolved,note
 0802e908,spi_flash_error_handler,logic,D1,R1,V0,no,logic: partial understanding (R1) - confirm semantics/data
 0802ea08,spi_flash_init_fs,logic,D2,R1,V0,no,logic: partial understanding (R1) - confirm semantics/data
 0802ee9c,spi2_sector_erase,hardware,D2,R0,V0,no,hardware: behavior not yet recovered (R0) - needs decode
-0802eee8,spi2_read_jedec_id,hardware,D2,R1,V0,no,hardware: partial understanding (R1) - confirm semantics/data
-0802ef48,spi2_init,hardware,D2,R1,V0,no,hardware: partial understanding (R1) - confirm semantics/data
+0802eee8,spi2_read_jedec_id,hardware,D3,R1,V0,no,DECODED 2026-06-13: stock uses opcode 0x90 (Read Mfr/Device ID + 3 dummy addr - 2 bytes) NOT 0x9F. Our flash_fs_raw_read_jedec uses 0x9F (3 bytes) - DIVERGENT command - R stays 1 (we read ID a different way). To resolve: add a 0x90 reader or justify the 0x9F divergence as NA.
+0802ef48,spi2_init,hardware,D2,R1,V0,no,partial: stock configs GPIOB PB12-15 (CS/SCK/MISO/MOSI - matches ours) via gpio_configure_pins + FUN_0802a514/FUN_08036820 SPI setup. Our flash_fs_raw_spi_init_once writes ctrl1 directly (master /16 mode0). Prescaler/mode not yet matched to stock - needs FUN_0802a514 decode before V.
 0802f048,spi2_block_read,hardware,D3,R2,V1,yes,RESOLVED 2026-06-13: static-equiv to flash_fs_raw_read (flash_fs.c) - CS=PB12 BCR/BSRR / cmd 0x03 / 24-bit addr / N reads / CS high - byte-identical protocol
 0802f0b8,spi2_receive_byte,hardware,D3,R2,V1,yes,RESOLVED 2026-06-13: static-equiv to flash_fs_raw_spi_xfer(0xFF) in flash_fs.c
 0802f0c4,spi2_transceive_byte,hardware,D3,R2,V1,yes,RESOLVED 2026-06-13: static-equiv to flash_fs_raw_spi_xfer (poll TXE sts.1 / write dt / poll RXNE sts.0 / read dt) - ghidra i2c_transfer is mislabel of SPI2 SR poll
