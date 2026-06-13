@@ -170,6 +170,67 @@ to GND). So the 5 gold pads = the 8/9/10/11 cluster + a nearby GND (EPAD or pin 
   reveal which `01 08`/`02 03`/… bit sets capture-enable.
 - **Apicula:** §4 + §5 delivered; R1 ramp validator queued for the JTAG bench.
 
+## 4a. Whole-binary GPIO audit (2026-06-13) — closes the input/EXTI/out-of-window blind spots
+
+The prior sweeps were **outputs-only, master-init-only, RECONFIG-framing-only**. This
+pass classified *every* GPIO access across all three decompiles (`decompiled_2C53T.c`,
+`_v2.c`, `analysis_v120/full_decompile.c`) — direct register pokes (`DAT_4001xxxx`) AND
+HAL-mediated (`gpio_read_pin(base,mask)` / `gpio_configure_pins`). Findings:
+
+**Inputs (the real blind spot) — only TWO pins are read, both already known-ish:**
+- **PC0** — `_DAT_40011008 & 1`, read in the scope acquisition FSM (the FPGA→MCU
+  "data-ready" we already mapped; also the likely EXTI source). No surprise.
+- **PC7** — `gpio_read_pin(0x40011000, 0x80)` in `FUN_08036084`, used as a *conditional
+  strap* (selects `FUN_0800bcd4(10)` vs `(7)` during a framebuffer/display branch).
+  **NEW: PC7 is read as a board-variant/strap input — previously unmapped (Tier C).**
+  Worth a continuity check; likely a HW-revision strap, not FPGA, but unconfirmed.
+- Buttons are read in the TMR3 ISR (separate, fully understood) — not re-listed.
+
+**Outputs surfaced that the pre-FPGA-window sweep missed:**
+- ⭐ **PD2** — driven **HIGH** (`_DAT_40011410 = 4`, GPIOD BSRR bit 2) in **three
+  scope/FPGA-mode-entry paths** (lines ~6854/7306/7775 of `_v2.c`), each right beside a
+  `fpga_queue` send + `device_mode`/`_config_value` change. **This upgrades PD2 from
+  "static HIGH, unexplained" to "asserted on FPGA scope-mode entry" — the strongest
+  hidden-FPGA-line candidate we have.** It is NOT one of our known FPGA control pins
+  (PC6/PB11/PC11/PB6) and NOT EXMC (PD2/3/12/13 are all free GPIO). Our firmware never
+  drives it. NB: the RECONFIG hunt pulsed PD2 low→high (negative) — but if PD2 is a
+  *held* mode/enable asserted before config, a pulse wouldn't replicate stock.
+- **PD12 / PD13** — driven (`_DAT_40011410 = 0x1000 / 0x2000`) in a `meter_state`-indexed
+  loop (channel/range-select shape). Previously logged "unconfigured"; **actually driven,
+  unmapped** — probably analog frontend, unconfirmed.
+- **PC1 / PC2** — confirmed *actively driven* (probe-atten relays), not merely "left at
+  default" as the pre-FPGA-window doc implied (they're driven at runtime, not at boot).
+- **PC4** — confirmed driven (BRR clear seen), mode-2 conditional (already known).
+
+**EXTI still not bit-decoded here:** the decompile abstracts AFIO/EXINT entirely (zero
+`DAT_4001000x`/`DAT_4001040x` refs — even the JTAG-disable remap is HAL'd), so EXTI
+line→pin source-select remains objdump-only (`stock_pre_fpga_gpio_state.md`: routes the
+"FPGA-ready/button lines"). PC0 is the FPGA-ready source; low residual risk.
+
+**Revised continuity priority for maksidze (supersedes §3 #3):**
+1. **PD2 → FPGA?** (now the top MCU-side candidate — asserted on scope-mode entry)
+2. **PD12/PD13, PC7** → FPGA or analog? (driven/read, unmapped)
+3. PC4/PD3 (lower — PD3 not seen driven in this pass; was CRH-config HIGH per objdump)
+
+If **PD2 traces to an FPGA input**, it's both a config-entry lever candidate *and*
+firmware-reachable (we can drive it) — exactly the "hidden connection" profile.
+
+### BENCH TEST — NEGATIVE (2026-06-13, Unit 2)
+Added a `fpga reinit` strap-hold knob (`s2`/`sd`, debug-only) and held PD2 (HIGH and
+LOW), PD12+PD13 (HIGH), and PD2+PD12/13 together through the entire handshake. **All
+five variants → `0x3A close=FF`, `0x03 status=FF FF FF FF`, acqread all-FF — identical
+to the no-strap control.** Driving these pins from the MCU has **zero effect on
+config-entry.** Conclusion: **PD2 is NOT the config-entry lever** (at least not a held
+MCU level we can drive). This is consistent with the standing finding that config-entry
+is FPGA *internal state*, not anything on an MCU-drivable line. Caveats (why it's a
+demotion, not a full disproof): PD2 may (a) connect to the FPGA but matter only
+*post-config* (a run/mode signal — the decompile shows it asserted on scope-mode
+*entry*, i.e. after config, fitting this), untestable until a live config exists; (b)
+need a timing/edge we didn't replicate; or (c) not reach the FPGA at all. **Demoted from
+"top config-entry candidate" to "driven-but-unmapped; trace to learn its role, not as a
+config lever." Its post-config/run relevance can only be tested with a JTAG-loaded
+config.** Strap knob left uncommitted (no green → below commit bar).
+
 ## 5. Sources
 - `stock_pre_fpga_gpio_state.md` (every pre-FPGA pin write, objdump-anchored)
 - `captures/SPI3_STOCK_BOOT_CAPTURE_ANALYSIS.md` → "RECONFIG-pin hunt — exhausted"

@@ -247,6 +247,14 @@ typedef struct {
                                   *   we sample at /2 may be unreliable and the
                                   *   CONFIG_ENABLE prelude may not land. Sweep
                                   *   this to send + read the handshake slowly. */
+    /* Strap-hold sweep (2026-06-13 whole-binary GPIO audit). Port-D pins that
+     * stock drives on scope-mode entry but our firmware never touches — held
+     * (NOT pulsed) through the ENTIRE handshake, matching stock. PD2 is the
+     * prime suspect (asserted beside fpga_queue sends in the decompile; the old
+     * RECONFIG pulse-test doesn't clear a HELD level). PD12/PD13 are driven in
+     * the meter_state channel loop. See unmapped_mcu_fpga_pin_candidates.md §4a. */
+    uint8_t  strap_pd2;       /* PD2:       0=untouched, 1=hold HIGH, 2=hold LOW */
+    uint8_t  strap_pd1213;    /* PD12+PD13: 0=untouched, 1=hold HIGH, 2=hold LOW */
 } fpga_cfg_seq_opts_t;
 
 /* Run the full SPI3 config handshake. Returns the 0x3A close status byte

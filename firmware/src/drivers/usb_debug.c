@@ -428,7 +428,7 @@ static void cmd_help(void)
         "spi3 read [len]                 Raw SPI3 read + hex dump\r\n"
         "spi3 xfer <hex...>              Send arbitrary MOSI bytes, dump MISO\r\n"
         "spi3 seq <b..> | <b..>          xfer w/ mid-sequence CS pulse at '|'\r\n"
-        "fpga reinit [br][gap][close][f0|1|2][u<ms>][a-e<pin>] Replay cfg+report\r\n"
+        "fpga reinit [br][gap][close][f0|1|2][u<ms>][a-e<pin>][s2|sd[h|l]] Replay cfg\r\n"
         "    f=prelude frame: 0 split(stock) 1 combined 2 merge15+3B; u=pre-upload gap; k<br>=cmd-phase clk div\r\n"
         "spi3 acqread                    Read CH1/CH2 via real 0x04/0x05 protocol\r\n"
         "spi3 gowin                      Read+decode Gowin ID/USERCODE/STATUS regs\r\n"
@@ -2004,6 +2004,7 @@ static void cmd_fpga_reinit(const char *args)
         .upload_br = 0, .prelude_gap_ms = 100, .post_close_ms = 600, .arm_pb11 = 1,
         .reset_port = 0, .reset_pin = 0, .reset_low_ms = 10,
         .prelude_frame_mode = 0, .pre_upload_gap_ms = 0, .cmd_br = 0,
+        .strap_pd2 = 0, .strap_pd1213 = 0,
     };
     char buf[80];
     if (args && *args) {
@@ -2032,6 +2033,11 @@ static void cmd_fpga_reinit(const char *args)
             } else if (tk[0] == 'k') {  /* 'k' (clock) — NOT 'c', which collides
                                          * with reset-port c (a..e) above */
                 opt.cmd_br = (uint32_t)strtoul(tk + 1, NULL, 0);
+            } else if (tk[0] == 's') {  /* strap-hold: s2[h|l]=PD2, sd[h|l]=PD12+13
+                                         * (default HIGH = stock). GPIO-audit lead. */
+                uint8_t lvl = (tk[2] == 'l') ? 2 : 1;
+                if (tk[1] == '2')      opt.strap_pd2    = lvl;
+                else if (tk[1] == 'd') opt.strap_pd1213 = lvl;
             }
         }
     }
@@ -2047,6 +2053,10 @@ static void cmd_fpga_reinit(const char *args)
         usb_debug_printf("reinit: br=%lu prelude_gap=%lums post_close=%lums frame=%s(%u) upgap=%lums cmdbr=%lu (no reset)\r\n",
                          opt.upload_br, opt.prelude_gap_ms, opt.post_close_ms,
                          fn, opt.prelude_frame_mode, opt.pre_upload_gap_ms, opt.cmd_br);
+    if (opt.strap_pd2 || opt.strap_pd1213)
+        usb_debug_printf("reinit: STRAP PD2=%s PD12/13=%s (held thru handshake)\r\n",
+                         opt.strap_pd2 == 1 ? "HIGH" : opt.strap_pd2 == 2 ? "LOW" : "-",
+                         opt.strap_pd1213 == 1 ? "HIGH" : opt.strap_pd1213 == 2 ? "LOW" : "-");
 
     uint8_t close = fpga_spi3_config_sequence(&opt);
 

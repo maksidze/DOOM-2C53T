@@ -1488,6 +1488,30 @@ uint8_t fpga_spi3_config_sequence(const fpga_cfg_seq_opts_t *opt)
         fpga_scope_delay_ms(1);
     }
 
+    /* Strap-hold (2026-06-13 GPIO-audit lead): drive Port-D pins that stock
+     * asserts on scope-mode entry but our firmware never touches, HELD through
+     * the entire handshake (prelude→0x3B→0x3A→status). NOT a pulse — a held
+     * level, matching stock. PD2 is the prime config-entry-lever candidate.
+     * See unmapped_mcu_fpga_pin_candidates.md §4a. */
+    if (opt->strap_pd2) {
+        gpio_cfg.gpio_pins = (1u << 2);                    /* PD2 */
+        gpio_cfg.gpio_mode = GPIO_MODE_OUTPUT;
+        gpio_cfg.gpio_out_type = GPIO_OUTPUT_PUSH_PULL;
+        gpio_cfg.gpio_drive_strength = GPIO_DRIVE_STRENGTH_STRONGER;
+        gpio_init(GPIOD, &gpio_cfg);
+        if (opt->strap_pd2 == 1) GPIOD->scr = (1u << 2);   /* hold HIGH (stock) */
+        else                     GPIOD->clr = (1u << 2);   /* hold LOW */
+    }
+    if (opt->strap_pd1213) {
+        gpio_cfg.gpio_pins = (1u << 12) | (1u << 13);      /* PD12, PD13 */
+        gpio_cfg.gpio_mode = GPIO_MODE_OUTPUT;
+        gpio_cfg.gpio_out_type = GPIO_OUTPUT_PUSH_PULL;
+        gpio_cfg.gpio_drive_strength = GPIO_DRIVE_STRENGTH_STRONGER;
+        gpio_init(GPIOD, &gpio_cfg);
+        if (opt->strap_pd1213 == 1) GPIOD->scr = (3u << 12);  /* hold HIGH */
+        else                        GPIOD->clr = (3u << 12);  /* hold LOW */
+    }
+
     if (opt->arm_pb11) {
         /* PB11 HIGH ~1ms before the CS pulse — stock raises it 1.0ms before
          * the bare CS pulse and holds it HIGH through the upload (capture). */
