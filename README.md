@@ -100,7 +100,7 @@ Flashing the firmware:
 > *   **First Boot Note:** The very first startup after flashing might be buggy, resulting in a flashing/blinking white screen. If this happens, power cycle the device (turn it off and back on manually) and wait for the game to load. Subsequent boots will be significantly faster.
 > *   **First Map Load Note:** The first time loading a map (after choosing the skill level) takes a long time (around 5 minutes). Subsequent map loads are much faster.
 
-To revert to the official firmware, flash the APP_2C53T_V1.2.0_251015.bin file.
+To revert to the official firmware, flash the [Official Firmware](https://www.fnirsi.com/pages/manuals-firmwares) file.
 
 ---
 
